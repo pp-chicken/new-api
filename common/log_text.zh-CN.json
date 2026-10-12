@@ -1,4 +1,8 @@
 {
+  "failed to copy background task": "复制后台任务失败",
+  "failed to persist background task completion: %s": "保存后台任务完成状态失败: %s",
+  "background task %s failed: %s": "后台任务 %s 失败: %s",
+  "background task expiry failed: %v": "后台任务超时清理失败: %v",
   "%d quota points": "%d 点额度",
   "%s after refresh: %s": "%s（刷新凭证后重试）: %s",
   "%s failed: %s": "%s 构建失败，%s",

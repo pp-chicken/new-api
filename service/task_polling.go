@@ -146,6 +146,14 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 	summary.UnfinishedTasks = len(allTasks)
 	platformTask := make(map[constant.TaskPlatform][]*model.Task)
 	for _, t := range allTasks {
+		if t.PrivateData.BackgroundDeadline > 0 {
+			if time.Now().Unix() >= t.PrivateData.BackgroundDeadline {
+				if err := failTaskFromPoll(ctx, nil, t, t.Status, "Task timed out"); err != nil {
+					logger.LogError(ctx, common.LogText("background task expiry failed: %v", err))
+				}
+			}
+			continue
+		}
 		platformTask[t.Platform] = append(platformTask[t.Platform], t)
 	}
 
@@ -702,9 +710,11 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 		return false
 	}
 	// 优先让 adaptor 决定最终额度。
-	if actualQuota := adaptor.AdjustBillingOnComplete(task, taskResult); actualQuota > 0 {
-		RecalculateTaskQuota(ctx, task, actualQuota, common.NewMessage("Adjusted by the channel adaptor"))
-		return true
+	if adaptor != nil {
+		if actualQuota := adaptor.AdjustBillingOnComplete(task, taskResult); actualQuota > 0 {
+			RecalculateTaskQuota(ctx, task, actualQuota, common.NewMessage("Adjusted by the channel adaptor"))
+			return true
+		}
 	}
 	// 回退到 token 重算。
 	tokens := taskResult.TotalTokens

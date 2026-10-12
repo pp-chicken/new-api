@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "openai-image", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -104,6 +104,11 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 			plugin, registerErr := registry.RegisterFactory(source, jsplugin.Options{Key: key})
 			require.NoError(t, registerErr)
 
+			if plugin.Meta.SubmitMode == "background" {
+				assert.Empty(t, plugin.Meta.Protocols)
+				assert.Equal(t, []string{"sse"}, plugin.Meta.SubmitResponseTypes)
+				return
+			}
 			var responsesClaim jsplugin.ProtocolClaim
 			foundResponses := false
 			for _, claim := range plugin.Meta.Protocols {
@@ -147,6 +152,9 @@ func TestBuiltInResponsesDecodersEchoChannelMappedAlias(t *testing.T) {
 			require.NoError(t, registerErr)
 			require.NotEmpty(t, plugin.Meta.Models)
 
+			if plugin.Meta.SubmitMode == "background" {
+				return
+			}
 			alias := "alias-under-test"
 			upstreamModel := plugin.Meta.Models[0]
 			body := map[string]any{"model": alias, "input": "a cat walking on the beach"}

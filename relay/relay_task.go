@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 )
 
 type TaskSubmitResult struct {
+	Background     *BackgroundTaskSubmission
 	UpstreamTaskID string
 	TaskData       []byte
 	ClientResponse any
@@ -35,7 +37,13 @@ type TaskSubmitResult struct {
 	Quota          int
 	Immediate      *relaycommon.TaskInfo
 	PluginState    []byte
-	//PerCallPrice   types.PriceData
+}
+
+// BackgroundTaskSubmission 在预扣和任务落库后执行一次上游请求。
+type BackgroundTaskSubmission struct {
+	Run     func(context.Context) (*channel.TaskSubmitResponse, *dto.TaskError)
+	Release func()
+	Adaptor service.TaskPollingAdaptor
 }
 
 // ResolveOriginTask 处理基于已有任务的提交（remix / continuation）：
@@ -342,6 +350,44 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	requestBody, err := adaptor.BuildRequestBody(c, info)
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "build_request_failed", http.StatusInternalServerError)
+	}
+
+	if pinnedPlugin.Plugin != nil && pinnedPlugin.Plugin.Meta.SubmitMode == "background" {
+		if !strings.HasPrefix(c.Request.URL.Path, "/v1/tasks/") || strings.Contains(c.GetHeader("Content-Type"), "multipart/") {
+			return nil, service.TaskErrorWrapperLocal(errors.New("background tasks require the generic JSON task API"), "invalid_request", http.StatusBadRequest)
+		}
+		release, acquired := service.AcquireBackgroundTask()
+		if !acquired {
+			return nil, service.TaskErrorWrapperLocal(errors.New("background task capacity reached"), "task_capacity_exceeded", http.StatusTooManyRequests)
+		}
+		// 在请求清理中间件运行前复制完整上游请求体，不持有临时文件或客户端 Writer。
+		body, readErr := io.ReadAll(io.LimitReader(requestBody, 4<<20+1))
+		if readErr != nil || len(body) > 4<<20 {
+			release()
+			return nil, service.TaskErrorWrapperLocal(errors.New("background request body exceeds size limit"), "invalid_request", http.StatusRequestEntityTooLarge)
+		}
+		worker := c.Copy()
+		workerInfo := *info
+		worker.Request = c.Request.Clone(context.WithoutCancel(c.Request.Context()))
+		return &TaskSubmitResult{
+			Platform: platform, Quota: info.PriceData.Quota, UpstreamTaskID: info.PublicTaskID,
+			Background: &BackgroundTaskSubmission{Release: release, Adaptor: adaptor,
+				Run: func(ctx context.Context) (*channel.TaskSubmitResponse, *dto.TaskError) {
+					worker.Request = worker.Request.WithContext(ctx)
+					resp, err := adaptor.DoRequest(worker, &workerInfo, bytes.NewReader(body))
+					if err != nil {
+						return nil, service.TaskErrorWrapperLocal(errors.New("background upstream request failed"), "do_request_failed", http.StatusBadGateway)
+					}
+					if resp == nil || resp.Body == nil {
+						return nil, service.TaskErrorWrapperLocal(errors.New("background upstream returned no response"), "do_request_failed", http.StatusBadGateway)
+					}
+					defer resp.Body.Close()
+					if resp.StatusCode/100 != 2 {
+						return nil, service.TaskErrorWrapperLocal(fmt.Errorf("background upstream returned HTTP %d", resp.StatusCode), "upstream_error", http.StatusBadGateway)
+					}
+					return adaptor.ParseResponse(worker, resp, &workerInfo)
+				}},
+		}, nil
 	}
 
 	// 9. 发送请求

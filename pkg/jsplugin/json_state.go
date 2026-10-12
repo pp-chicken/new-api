@@ -17,6 +17,7 @@ const (
 	CapabilityJSONOrder      = "json-order@1"
 	CapabilityDurationAuto   = "duration-auto@1"
 	MaxJSONToolBytes         = 1 << 20
+	MaxSubmitResultBytes     = 32 << 20
 	maxJSONToolDepth         = 32
 	maxJSONToolNodes         = 32768
 	maxJSONChanges           = 256
@@ -218,7 +219,7 @@ func newJSONStateNode(value any, depth int, budget *jsonStateBudget) (*jsonState
 }
 
 func NewJSONState(limit int) *JSONState {
-	return &JSONState{root: &jsonStateNode{bytes: 4, nodes: 1}, limit: max(0, min(limit, MaxJSONToolBytes))}
+	return &JSONState{root: &jsonStateNode{bytes: 4, nodes: 1}, limit: max(0, min(limit, MaxSubmitResultBytes))}
 }
 
 // Apply accepts a bounded batch of set, append and appendText operations.

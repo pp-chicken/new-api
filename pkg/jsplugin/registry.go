@@ -84,6 +84,7 @@ func (t *LocalizedText) UnmarshalJSON(data []byte) error {
 }
 
 type Meta struct {
+	SubmitMode           string                      `json:"submitMode,omitempty"`
 	RequiredCapabilities []string                    `json:"requiredCapabilities,omitempty"`
 	SubmitResponseTypes  []string                    `json:"submitResponseTypes,omitempty"`
 	SortPriority         int                         `json:"sortPriority,omitempty"`
@@ -1030,7 +1031,7 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	for field := range object {
 		switch field {
-		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions":
+		case "submitMode", "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions":
 		default:
 			return Meta{}, &UnknownMetaFieldError{Field: field}
 		}
@@ -1095,6 +1096,10 @@ func decodeMeta(value any) (Meta, error) {
 		return Meta{}, err
 	}
 	if meta.FetchMode, err = stringMetaField(object, "fetchMode"); err != nil {
+		return Meta{}, err
+	}
+	meta.SubmitMode, err = stringMetaField(object, "submitMode")
+	if err != nil {
 		return Meta{}, err
 	}
 	meta.SubmitResponseTypes = []string{"json"}
@@ -1208,6 +1213,12 @@ func ValidateV1Meta(meta Meta) error {
 }
 
 func normalizeV1Meta(meta *Meta) error {
+	if meta.SubmitMode != "" && meta.SubmitMode != "background" {
+		return fmt.Errorf("unsupported submitMode %q", meta.SubmitMode)
+	}
+	if meta.SubmitMode == "background" && (len(meta.Routes) != 0 || len(meta.Protocols) != 0 || meta.FetchMode != "per_task") {
+		return fmt.Errorf("background submission requires the generic task API and per_task fetchMode")
+	}
 	seenCapabilities := make(map[string]bool, len(meta.RequiredCapabilities))
 	for _, name := range meta.RequiredCapabilities {
 		if !HasCapability(name) || seenCapabilities[name] {

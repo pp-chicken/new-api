@@ -103,6 +103,14 @@ const maxTaskArtifacts = 64
 // maxTaskPluginPersistedJSONBytes is the shared ceiling for taskData and plugin state.
 const maxTaskPluginPersistedJSONBytes = 1 << 20
 
+// 后台图片结果允许 32 MiB；普通插件的状态和结果仍维持 1 MiB 上限。
+func (a *TaskAdaptor) resultLimit() int {
+	if a.plugin.Meta.SubmitMode == "background" {
+		return pluginruntime.MaxSubmitResultBytes
+	}
+	return maxTaskPluginPersistedJSONBytes
+}
+
 type TaskAdaptor struct {
 	plugin         *pluginruntime.LoadedPlugin
 	info           *relaycommon.RelayInfo
@@ -524,8 +532,8 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 		responseBody, err = a.readSubmitEvents(c.Request.Context(), resp, a.submitContext(c, info))
 	} else {
 		var body []byte
-		body, err = io.ReadAll(io.LimitReader(resp.Body, maxTaskPluginPersistedJSONBytes+1))
-		if err == nil && len(body) > maxTaskPluginPersistedJSONBytes {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, int64(a.resultLimit()+1)))
+		if err == nil && len(body) > a.resultLimit() {
 			err = fmt.Errorf("task submit response exceeds size limit")
 		}
 		responseBody = string(body)
@@ -574,7 +582,7 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	var taskData []byte
 	if parsed.TaskData != nil {
 		taskData, err = common.Marshal(parsed.TaskData)
-		if err != nil || len(taskData) > maxTaskPluginPersistedJSONBytes {
+		if err != nil || len(taskData) > a.resultLimit() {
 			if err == nil {
 				err = fmt.Errorf("task data exceeds size limit")
 			}
@@ -1050,7 +1058,15 @@ func (a *TaskAdaptor) BuildContentRequest(ctx context.Context, task *model.Task,
 			return nil, fmt.Errorf("credentialless artifact requests cannot contain headers or a body")
 		}
 		parsedURL, parseErr := url.Parse(descriptor.URL)
-		if parseErr != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		inlineImage := false
+		if a.plugin.Meta.SubmitMode == "background" && strings.HasPrefix(descriptor.URL, "data:") && len(descriptor.URL) <= a.resultLimit() {
+			header, payload, found := strings.Cut(descriptor.URL, ",")
+			if found && (header == "data:image/png;base64" || header == "data:image/jpeg;base64" || header == "data:image/webp;base64") {
+				_, decodeErr := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)))
+				inlineImage = payload != "" && decodeErr == nil
+			}
+		}
+		if !inlineImage && (parseErr != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https")) {
 			return nil, fmt.Errorf("credentialless artifact request URL must be absolute HTTP(S)")
 		}
 	} else if err = pluginruntime.ValidateRequestURL(descriptor.URL, a.info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts); err != nil {

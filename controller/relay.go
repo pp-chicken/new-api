@@ -481,6 +481,12 @@ func executeTaskSubmissionWith(
 	var result *relay.TaskSubmitResult
 	var taskErr *taskdto.TaskError
 	durable := false
+	backgroundStarted := false
+	defer func() {
+		if !backgroundStarted && result != nil && result.Background != nil {
+			result.Background.Release()
+		}
+	}()
 	stage := "start"
 	defer func() {
 		if !durable && relayInfo.Billing != nil {
@@ -631,6 +637,12 @@ func executeTaskSubmissionWith(
 		PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
 		TieredSnapshot:  relayInfo.TieredBillingSnapshot,
 	}
+	if result.Background != nil {
+		// 向上取整，避免秒级持久化把短超时截成不足一秒。
+		task.PrivateData.BackgroundDeadline = time.Now().Add(service.BackgroundTaskTimeout()).Unix() + 1
+		task.Status = model.TaskStatusInProgress
+		task.StartTime = time.Now().Unix()
+	}
 	task.Quota = result.Quota
 	task.Data = result.TaskData
 	if len(result.PluginState) > 0 {
@@ -704,6 +716,10 @@ func executeTaskSubmissionWith(
 	}
 	service.LogTaskConsumption(c, relayInfo, task)
 	diagnostics.complete(task, result.Quota)
+	if result.Background != nil {
+		backgroundStarted = true
+		startBackgroundTask(c.Request.Context(), task, result.Background)
+	}
 
 	return &taskSubmissionOutcome{Result: result, Task: task, RelayInfo: relayInfo}, nil
 }
@@ -752,10 +768,14 @@ func presentTaskSubmission(c *gin.Context, outcome *taskSubmissionOutcome) {
 		createdAt = outcome.Task.SubmitTime
 	}
 	diagnostics.present(outcome.Task, "host_fallback")
+	status := "queued"
+	if outcome.Result != nil && outcome.Result.Background != nil {
+		status = outcome.Task.Status.ToVideoStatus()
+	}
 	c.JSON(http.StatusOK, map[string]any{
 		"id":         outcome.Task.TaskID,
 		"task_id":    outcome.Task.TaskID,
-		"status":     "queued",
+		"status":     status,
 		"model":      outcome.RelayInfo.OriginModelName,
 		"created_at": createdAt,
 	})
