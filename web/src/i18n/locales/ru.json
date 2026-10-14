@@ -7254,6 +7254,10 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Client connection error": "Ошибка соединения клиента",
+    "Client connection error details": "Подробности ошибки соединения клиента",
+    "Stream error details": "Подробности ошибки потока",
+    "Error details": "Подробности ошибки",
+    "HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.": "HTTP 101 / handshake_complete подтверждает только установление соединения WebSocket. Причины прерывания смотрите в подробностях ошибок соединения и потока.",
     "Connection end": "Завершение соединения",
     "Connection reused": "Повторное использование соединения",
     "Copy diagnostic JSON": "Копировать JSON диагностики",
@@ -7306,5 +7310,7 @@
     "Start time": "Время начала",
     "End time": "Время завершения",
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "Нет нового рукопожатия для этой генерации. Повторное соединение указано в родительской записи."
-  }
+  },
+  "WebSocket heartbeat": "Пульс WebSocket",
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Периодически отправляет кадры Ping клиентам WebSocket этого ключа. Отключите для несовместимых клиентов. Изменения применяются после переподключения."
 }

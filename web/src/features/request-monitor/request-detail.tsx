@@ -120,6 +120,15 @@ export function RequestDetail(props: {
       cell: (row) => row.end || t('In progress'),
     },
     {
+      id: 'errorDetail',
+      header: t('Error details'),
+      cell: (row) => (
+        <div className='max-w-sm break-all whitespace-pre-wrap'>
+          <span>{row.error_detail || '—'}</span>
+        </div>
+      ),
+    },
+    {
       id: 'request',
       header: t('Upstream request ID'),
       cell: (row) =>
@@ -254,6 +263,22 @@ export function RequestDetail(props: {
                 {data.stream_end || '—'} / {data.stream_outcome || '—'}
               </dd>
             </div>
+            <div className='min-w-0 sm:col-span-2'>
+              <dt className='text-muted-foreground'>
+                {t('Client connection error details')}
+              </dt>
+              <dd className='break-all whitespace-pre-wrap'>
+                {data.client_error_detail || '—'}
+              </dd>
+            </div>
+            <div className='min-w-0 sm:col-span-2'>
+              <dt className='text-muted-foreground'>
+                {t('Stream error details')}
+              </dt>
+              <dd className='break-all whitespace-pre-wrap'>
+                {data.stream_error || '—'}
+              </dd>
+            </div>
           </dl>
           {data.truncated && (
             <p className='text-amber-700 dark:text-amber-400'>
@@ -267,6 +292,13 @@ export function RequestDetail(props: {
                 'HTTP 200 does not guarantee stream completion. EOF is a transport end; use stream outcome and request decision flow to diagnose interruptions.'
               )}
             </p>
+            {data.upstreams?.some((row) => row.protocol === 'WebSocket') && (
+              <p className='text-muted-foreground text-xs'>
+                {t(
+                  'HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.'
+                )}
+              </p>
+            )}
             <StaticDataTable
               columns={columns}
               data={data.upstreams ?? []}

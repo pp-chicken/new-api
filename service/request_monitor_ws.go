@@ -23,6 +23,7 @@ type MonitorSocket struct {
 	LastActivity time.Time `json:"last_activity"`
 	CloseCode    int       `json:"close_code"`
 	Error        string    `json:"error"`
+	ErrorDetail  string    `json:"error_detail,omitempty"`
 }
 
 type MonitorWebSocket struct {
@@ -91,6 +92,7 @@ func MonitorWSMessage(ctx context.Context, side string, incoming bool, size int,
 	if ws.GatewayCloseCode != 0 || socket.Error != "" || socket.CloseCode != 0 {
 		return
 	}
+	socket.ErrorDetail = monitorErrorDetail(err)
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) {
 		socket.CloseCode = closeErr.Code
@@ -142,6 +144,7 @@ func MonitorWSHandshake(c *gin.Context, endpoint string, started time.Time, resp
 	row.DurationMS = row.HeadersMS
 	if err != nil {
 		row.End = monitorError(err)
+		row.ErrorDetail = monitorErrorDetail(err)
 	}
 	for _, target := range []*requestMonitorTrace{trace, parent} {
 		if target == nil {

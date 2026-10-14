@@ -7254,6 +7254,10 @@
     "Zhipu V4": "Zhipu V 4",
     "Zoom": "ズーム",
     "Client connection error": "クライアント接続エラー",
+    "Client connection error details": "クライアント接続エラーの詳細",
+    "Stream error details": "ストリームエラーの詳細",
+    "Error details": "エラーの詳細",
+    "HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.": "HTTP 101 / handshake_complete は WebSocket ハンドシェイクの成功のみを示します。中断の原因は接続とストリームのエラー詳細を確認してください。",
     "Connection end": "接続終了理由",
     "Connection reused": "接続の再利用",
     "Copy diagnostic JSON": "診断 JSON をコピー",
@@ -7306,5 +7310,7 @@
     "Start time": "開始時刻",
     "End time": "終了時刻",
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "今回の生成には新しいハンドシェイク記録がありません。再利用された上流接続は親接続で確認してください。"
-  }
+  },
+  "WebSocket heartbeat": "WebSocket ハートビート",
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "このキーの WebSocket クライアントに定期的に Ping を送信します。非対応のクライアントでは無効にしてください。変更は再接続後に適用されます。"
 }

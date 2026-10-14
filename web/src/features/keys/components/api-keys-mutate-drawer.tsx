@@ -520,6 +520,31 @@ export function ApiKeysMutateDrawer({
 
               <FormField
                 control={form.control}
+                name='websocket_ping_disabled'
+                render={({ field }) => (
+                  <FormItem className={sideDrawerSwitchItemClassName()}>
+                    <div className='flex flex-col gap-0.5'>
+                      <FormLabel className='text-sm'>
+                        {t('WebSocket heartbeat')}
+                      </FormLabel>
+                      <FormDescription className='text-xs'>
+                        {t(
+                          'Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.'
+                        )}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={!field.value}
+                        onCheckedChange={(enabled) => field.onChange(!enabled)}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
                 name='expired_time'
                 render={({ field }) => (
                   <FormItem>

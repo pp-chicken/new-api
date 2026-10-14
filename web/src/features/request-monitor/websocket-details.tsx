@@ -85,6 +85,15 @@ export function WebSocketDetails(props: {
       cell: (row) => row.close_code || '—',
     },
     { id: 'error', header: t('Error'), cell: (row) => row.error || '—' },
+    {
+      id: 'errorDetail',
+      header: t('Error details'),
+      cell: (row) => (
+        <div className='max-w-sm break-all whitespace-pre-wrap'>
+          <span>{row.error_detail || '—'}</span>
+        </div>
+      ),
+    },
   ]
   const callColumns: StaticDataTableColumn<MonitoredRequest>[] = [
     {

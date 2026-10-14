@@ -1,12 +1,19 @@
 package middleware_test
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
@@ -15,6 +22,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -64,6 +72,10 @@ func TestRequestMonitorTruncatedUpstreamPreservesHTTP200AndFailure(t *testing.T)
 	serialized, err := common.Marshal(row)
 	require.NoError(t, err)
 	assert.NotContains(t, string(serialized), "secret")
+	var diagnostic map[string]any
+	require.NoError(t, common.Unmarshal(serialized, &diagnostic))
+	assert.Equal(t, "unexpected EOF", diagnostic["stream_error"])
+	assert.Equal(t, "unexpected EOF", diagnostic["upstreams"].([]any)[0].(map[string]any)["error_detail"])
 	// 快照是独立副本，调用方不能修改后续查询结果。
 	rows[0].Upstreams[0].End = "changed"
 	assert.Equal(t, "unexpected_eof", service.RequestMonitorSnapshots()[0].Upstreams[0].End)
@@ -95,7 +107,7 @@ func TestRequestMonitorCanceledDownstreamAndRetries(t *testing.T) {
 			require.NoError(t, response.Body.Close())
 			if channel == 1 {
 				status := relaycommon.NewStreamStatus()
-				status.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
+				status.SetEndReason(relaycommon.StreamEndReasonTimeout, context.DeadlineExceeded)
 				service.RecordMonitorStream(c, status)
 			}
 		}
@@ -108,6 +120,9 @@ func TestRequestMonitorCanceledDownstreamAndRetries(t *testing.T) {
 	assert.Equal(t, 503, row.Upstreams[0].Status)
 	assert.Equal(t, 200, row.Upstreams[1].Status)
 	assert.Equal(t, 2, row.Upstreams[1].ChannelID)
+	serialized, err := common.Marshal(row)
+	require.NoError(t, err)
+	assert.NotContains(t, string(serialized), "context deadline exceeded")
 	engine.GET("/cancel", func(c *gin.Context) { c.Status(http.StatusOK) })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -115,6 +130,81 @@ func TestRequestMonitorCanceledDownstreamAndRetries(t *testing.T) {
 	row = service.RequestMonitorSnapshots()[0]
 	assert.Equal(t, "failed", row.State)
 	assert.Equal(t, "canceled", row.ClientError)
+	serialized, err = common.Marshal(row)
+	require.NoError(t, err)
+	assert.Contains(t, string(serialized), `"client_error_detail":"context canceled"`)
+}
+
+func TestRequestMonitorWebSocketErrorDetails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "abnormal close", err: &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}, want: "websocket: close 1006 (abnormal closure): unexpected EOF"},
+		{name: "close reason excludes peer text", err: &websocket.CloseError{Code: websocket.CloseInternalServerErr, Text: "secret-body Bearer secret-token"}, want: "websocket: close 1011 (internal server error)"},
+		{name: "normal close before response completes", err: &websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "secret-body"}, want: "websocket: close 1000 (normal)"},
+		{name: "wrapped network reset excludes URL", err: &url.Error{Op: "Get", URL: "https://secret-user:secret-password@example.test/?key=secret-token", Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}, want: "connection reset by peer"},
+		{name: "websocket message limit", err: fmt.Errorf("secret-wrapper: %w", websocket.ErrReadLimit), want: "websocket: read limit exceeded"},
+		{name: "scanner buffer limit", err: bufio.ErrTooLong, want: "bufio.Scanner: token too long"},
+		{name: "closed connection", err: net.ErrClosed, want: "use of closed network connection"},
+		{name: "DNS lookup failure", err: &net.DNSError{Name: "secret-host", Err: "secret-message", IsNotFound: true}, want: "DNS host not found"},
+		{name: "network timeout", err: &net.OpError{Op: "secret-operation", Err: syscall.ETIMEDOUT}, want: "network I/O timeout"},
+		{name: "unknown error excludes body", err: errors.New("secret-body"), want: "transport error (details omitted)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(middleware.RequestId(), middleware.RouteTag("relay"))
+			engine.GET("/ws", func(c *gin.Context) {
+				service.MonitorWSConnected(c)
+				service.MonitorWSMessage(c.Request.Context(), "upstream", true, 0, tc.err)
+				service.MonitorWSShutdown(c.Request.Context(), websocket.CloseInternalServerErr)
+				service.MonitorWSMessage(c.Request.Context(), "upstream", true, 0, net.ErrClosed)
+				service.StartMonitorWSCall(c)
+				status := relaycommon.NewStreamStatus()
+				status.SetEndReason(relaycommon.StreamEndReasonScannerErr, tc.err)
+				service.MarkRequestPolicySuccess(c, status)
+			})
+			engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ws", nil))
+			rows := service.RequestMonitorSnapshots()
+			require.GreaterOrEqual(t, len(rows), 2)
+			assert.Equal(t, "ws_request", rows[0].Kind)
+			assert.Equal(t, "failed", rows[0].State)
+			serialized, err := common.Marshal(rows[:2])
+			require.NoError(t, err)
+			assert.NotContains(t, string(serialized), "secret")
+			var diagnostic []map[string]any
+			require.NoError(t, common.Unmarshal(serialized, &diagnostic))
+			assert.Equal(t, tc.want, diagnostic[0]["stream_error"])
+			ws := diagnostic[1]["websocket"].(map[string]any)
+			assert.Equal(t, tc.want, ws["upstream"].(map[string]any)["error_detail"])
+			assert.Equal(t, "upstream", ws["close_source"])
+		})
+	}
+}
+
+func TestRequestMonitorWebSocketHandshakeErrorDetails(t *testing.T) {
+	engine := gin.New()
+	engine.Use(middleware.RequestId(), middleware.RouteTag("relay"))
+	engine.GET("/ws", func(c *gin.Context) {
+		service.MonitorWSConnected(c)
+		service.StartMonitorWSCall(c)
+		service.MonitorWSHandshake(c, "wss://secret-user:secret-password@example.test/v1/responses?key=secret-token", time.Now(), &http.Response{
+			StatusCode: http.StatusBadGateway,
+		}, fmt.Errorf("secret-wrapper: %w", websocket.ErrBadHandshake))
+		c.Status(http.StatusBadGateway)
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ws", nil))
+	rows := service.RequestMonitorSnapshots()
+	require.GreaterOrEqual(t, len(rows), 2)
+	for _, row := range rows[:2] {
+		require.Len(t, row.Upstreams, 1)
+		assert.Equal(t, http.StatusBadGateway, row.Upstreams[0].Status)
+		assert.Equal(t, "websocket: bad handshake", row.Upstreams[0].ErrorDetail)
+		serialized, err := common.Marshal(row)
+		require.NoError(t, err)
+		assert.NotContains(t, string(serialized), "secret")
+	}
 }
 
 func TestRequestMonitorRunningRetentionFiltersAndAccess(t *testing.T) {
@@ -209,5 +299,6 @@ func TestRequestMonitorObservesActiveUpstreamWithoutConsumingStream(t *testing.T
 	completed := service.RequestMonitorSnapshots()[0]
 	assert.Equal(t, "completed", completed.State)
 	assert.Equal(t, "eof", completed.Upstreams[0].End)
+	assert.Empty(t, completed.Upstreams[0].ErrorDetail)
 	assert.Equal(t, int64(len(received)), completed.Upstreams[0].Bytes)
 }

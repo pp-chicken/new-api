@@ -530,6 +530,107 @@ func newTestWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func(
 	return target, serverConn, cleanup
 }
 
+func TestResponsesWSClientHeartbeat(t *testing.T) {
+	previous := constant.WebSocketPingIntervalSeconds
+	constant.WebSocketPingIntervalSeconds = 1
+	t.Cleanup(func() { constant.WebSocketPingIntervalSeconds = previous })
+	client, server, cleanup := newTestWebSocketPair(t)
+	defer cleanup()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	var admitted atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ResponsesWebSocketHelper(c, server, func(*http.Request, string, func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+			admitted.Store(true)
+			return nil
+		})
+	}()
+	// 空闲会话连续收到心跳，并像 Codex 一样回复 Pong；随后验证业务消息仍可正常处理。
+	var payloads []string
+	client.SetPingHandler(func(payload string) error {
+		payloads = append(payloads, payload)
+		if err := client.WriteControl(websocket.PongMessage, []byte(payload), time.Now().Add(time.Second)); err != nil {
+			return err
+		}
+		if len(payloads) == 2 {
+			return client.WriteMessage(websocket.TextMessage, []byte(`{"type":"unsupported"}`))
+		}
+		return nil
+	})
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+	kind, body, err := client.ReadMessage()
+	require.NoError(t, err)
+	assert.Equal(t, websocket.TextMessage, kind)
+	assert.Equal(t, []string{"", ""}, payloads)
+	var event map[string]any
+	require.NoError(t, common.Unmarshal(body, &event))
+	assert.Equal(t, "error", event["type"])
+	assert.False(t, admitted.Load(), "Ping/Pong 不应触发模型请求")
+	require.NoError(t, client.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second)))
+	_, _, err = client.ReadMessage()
+	assert.True(t, websocket.IsCloseError(err, websocket.CloseNormalClosure))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("关闭连接后心跳和会话未退出")
+	}
+}
+
+func TestResponsesWSDisabledHeartbeat(t *testing.T) {
+	previous := constant.WebSocketPingIntervalSeconds
+	constant.WebSocketPingIntervalSeconds = 1
+	t.Cleanup(func() { constant.WebSocketPingIntervalSeconds = previous })
+	client, server, cleanup := newTestWebSocketPair(t)
+	defer cleanup()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyTokenWebSocketPingDisabled, true)
+	done := make(chan struct{})
+	go func() { defer close(done); ResponsesWebSocketHelper(c, server, nil) }()
+	defer func() { _ = client.Close(); <-done }()
+	client.SetPingHandler(func(string) error { return errors.New("已关闭心跳却收到 Ping") })
+	// 跨过一次心跳周期后发业务帧，用返回的业务错误确认读循环没有收到 Ping。
+	timer := time.AfterFunc(1500*time.Millisecond, func() { _ = client.WriteMessage(websocket.TextMessage, []byte(`{"type":"unsupported"}`)) })
+	defer timer.Stop()
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+	kind, body, err := client.ReadMessage()
+	require.NoError(t, err)
+	assert.Equal(t, websocket.TextMessage, kind)
+	var event map[string]any
+	require.NoError(t, common.Unmarshal(body, &event))
+	assert.Equal(t, "error", event["type"])
+}
+
+func TestClientWSPingFailureAndCancellation(t *testing.T) {
+	previous := constant.WebSocketPingIntervalSeconds
+	constant.WebSocketPingIntervalSeconds = 1
+	t.Cleanup(func() { constant.WebSocketPingIntervalSeconds = previous })
+	client, _, cleanup := newTestWebSocketPair(t)
+	defer cleanup()
+	require.NoError(t, client.Close())
+	failures := make(chan error, 1)
+	stop := startClientWSPing(context.Background(), client, false, func(err error) { failures <- err })
+	defer stop()
+	select {
+	case err := <-failures:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("心跳写入失败未通知会话")
+	}
+	stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopCanceled := startClientWSPing(ctx, client, false, func(err error) { failures <- err })
+	stopCanceled()
+	select {
+	case err := <-failures:
+		t.Fatalf("已取消的心跳仍尝试写入: %v", err)
+	default:
+	}
+}
+
 func TestResponsesWSMessageSizeLimit(t *testing.T) {
 	previous := constant.MaxRequestBodyMB
 	constant.MaxRequestBodyMB = 1

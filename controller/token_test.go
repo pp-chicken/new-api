@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -355,6 +356,7 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 		t.Fatalf("expected migrated auto_groups column type text, got %q", got)
 	}
 
+	require.True(t, db.Migrator().HasColumn(&model.Token{}, "websocket_ping_disabled"))
 	var migratedToken model.Token
 	if err := db.First(&migratedToken, "name = ?", "legacy-token").Error; err != nil {
 		t.Fatalf("failed to load migrated token row: %v", err)
@@ -368,6 +370,19 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	if migratedToken.AutoGroups != "" {
 		t.Fatalf("expected legacy token to inherit global Auto groups, got %q", migratedToken.AutoGroups)
 	}
+
+	assert.False(t, migratedToken.WebSocketPingDisabled)
+	migratedToken.WebSocketPingDisabled = true
+	require.NoError(t, migratedToken.Update())
+	for range 2 {
+		migrateTokenControllerTestDB(t, db)
+	}
+	require.NoError(t, db.First(&migratedToken, migratedToken.Id).Error)
+	assert.True(t, migratedToken.WebSocketPingDisabled)
+	migratedToken.WebSocketPingDisabled = false
+	require.NoError(t, migratedToken.Update())
+	require.NoError(t, db.First(&migratedToken, migratedToken.Id).Error)
+	assert.False(t, migratedToken.WebSocketPingDisabled)
 
 	inserted := model.Token{
 		UserId:             8,
@@ -397,6 +412,17 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	if fetched.Key != longKey {
 		t.Fatalf("expected long token key %q, got %q", longKey, fetched.Key)
 	}
+	// 同一隔离测试数据库也验证新建表以及重复迁移的默认值。
+	freshDB := db.Table("tokens_heartbeat_fresh")
+	t.Cleanup(func() { _ = db.Migrator().DropTable("tokens_heartbeat_fresh") })
+	for range 2 {
+		require.NoError(t, freshDB.AutoMigrate(&model.Token{}))
+	}
+	fresh := model.Token{UserId: 8, Name: "fresh-heartbeat", Key: longKey}
+	require.NoError(t, freshDB.Create(&fresh).Error)
+	require.NoError(t, freshDB.First(&fresh, fresh.Id).Error)
+	assert.False(t, fresh.WebSocketPingDisabled)
+	assert.Error(t, freshDB.Create(&model.Token{UserId: 9, Key: longKey}).Error, "迁移必须保留密钥唯一约束")
 }
 
 func TestTokenAutoMigrateUsesVarchar128KeyColumn(t *testing.T) {
@@ -891,4 +917,51 @@ func verifyAPITokenAudit(t *testing.T) {
 		require.NoError(t, model.DB.Model(&model.Token{}).Where("name = ?", "audit-down").Count(&count).Error)
 		assert.EqualValues(t, 1, count)
 	})
+}
+
+func TestTokenWebSocketHeartbeatPreference(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	body := map[string]any{"name": "heartbeat", "expired_time": -1, "unlimited_quota": true, "group": "default", "websocket_ping_disabled": true}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+	AddToken(ctx)
+	require.True(t, decodeAPIResponse(t, recorder).Success)
+	var token model.Token
+	require.NoError(t, db.Where("name = ?", "heartbeat").First(&token).Error)
+	require.True(t, token.WebSocketPingDisabled)
+	body["id"] = token.Id
+	for _, tc := range []struct {
+		name    string
+		user    int
+		value   any
+		omitted bool
+		want    bool
+		success bool
+	}{
+		{name: "旧客户端省略字段保留关闭", user: 1, omitted: true, want: true, success: true},
+		{name: "其他用户不能修改", user: 2, value: false, want: true},
+		{name: "重新开启可持久化零值", user: 1, value: false, want: false, success: true},
+		{name: "可以再次关闭", user: 1, value: true, want: true, success: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.omitted {
+				delete(body, "websocket_ping_disabled")
+			} else {
+				body["websocket_ping_disabled"] = tc.value
+			}
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, tc.user)
+			UpdateToken(ctx)
+			response := decodeAPIResponse(t, recorder)
+			require.Equal(t, tc.success, response.Success)
+			require.NoError(t, db.First(&token, token.Id).Error)
+			assert.Equal(t, tc.want, token.WebSocketPingDisabled)
+			require.NoError(t, middleware.SetupContextForToken(ctx, &token))
+			assert.Equal(t, tc.want, ctx.GetBool(string(constant.ContextKeyTokenWebSocketPingDisabled)))
+			if tc.success {
+				var detail model.Token
+				require.NoError(t, common.Unmarshal(response.Data, &detail))
+				assert.Equal(t, tc.want, detail.WebSocketPingDisabled)
+				assert.NotContains(t, recorder.Body.String(), token.Key)
+			}
+		})
+	}
 }

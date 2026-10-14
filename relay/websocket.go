@@ -1,10 +1,12 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/wsmanager"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -14,6 +16,44 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+// startClientWSPing 仅发送协议控制帧，不进入业务消息、计费或响应超时统计。
+// 返回的停止函数会等待心跳退出；onError 不得调用该停止函数。
+func startClientWSPing(ctx context.Context, client *websocket.Conn, disabled bool, onError func(error)) func() {
+	if disabled {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	seconds := constant.WebSocketPingIntervalSeconds
+	if seconds <= 0 || seconds > 86400 {
+		seconds = 10
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Duration(seconds) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if ctx.Err() != nil {
+					return
+				}
+				// WriteControl 可与业务写入并发，使用独立的写入期限。
+				if err := client.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+					onError(err)
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
 
 func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
@@ -50,6 +90,13 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 		defer unregister()
 	}
 
+	stopPing := startClientWSPing(c.Request.Context(), info.ClientWs, c.GetBool(string(constant.ContextKeyTokenWebSocketPingDisabled)), func(error) {
+		_ = info.ClientWs.Close()
+		if info.TargetWs != nil {
+			_ = info.TargetWs.Close()
+		}
+	})
+	defer stopPing()
 	usage, newAPIError := adaptor.DoResponse(c, nil, info)
 	if newAPIError != nil {
 		// reset status code 重置状态码

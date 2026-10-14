@@ -278,3 +278,17 @@ describe('API keys mutate drawer Auto group integration', () => {
     expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
   })
 })
+
+test('WebSocket 心跳默认开启，关闭后为新密钥提交禁用配置', async () => {
+  const createdPayloads: Array<Record<string, unknown>> = []
+  installApiFixtures(createdPayloads)
+  await renderCreateDrawer()
+  const heartbeat = screen.getByRole('switch', { name: 'WebSocket heartbeat' })
+  expect(heartbeat).toBeChecked()
+  fireEvent.click(heartbeat)
+  expect(heartbeat).not.toBeChecked()
+  changeInput(getControlByLabel('Name'), 'without-heartbeat')
+  fireEvent.click(findButton('Save changes', true))
+  await waitFor(() => expect(createdPayloads).toHaveLength(1))
+  expect(createdPayloads[0]?.websocket_ping_disabled).toBe(true)
+})

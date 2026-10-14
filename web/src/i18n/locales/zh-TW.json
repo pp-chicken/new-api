@@ -7254,6 +7254,10 @@
     "Zhipu V4": "智譜 V4",
     "Zoom": "縮放",
     "Client connection error": "用戶端連線錯誤",
+    "Client connection error details": "用戶端連線錯誤詳情",
+    "Stream error details": "串流錯誤詳情",
+    "Error details": "錯誤詳情",
+    "HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.": "HTTP 101 / handshake_complete 僅表示 WebSocket 握手成功。連線中斷原因請查看連線與串流錯誤詳情。",
     "Connection end": "連線結束原因",
     "Connection reused": "連線重用",
     "Copy diagnostic JSON": "複製診斷 JSON",
@@ -7306,5 +7310,7 @@
     "Start time": "開始時間",
     "End time": "結束時間",
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "此次生成未記錄新的握手。若重用了上游連線，請查看所屬連線的握手資訊。"
-  }
+  },
+  "WebSocket heartbeat": "WebSocket 心跳",
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "定時向此金鑰的 WebSocket 用戶端傳送 Ping。不相容的用戶端可關閉，修改後重新連線生效。"
 }

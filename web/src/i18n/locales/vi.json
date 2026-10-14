@@ -7254,6 +7254,10 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Client connection error": "Lỗi kết nối máy khách",
+    "Client connection error details": "Chi tiết lỗi kết nối máy khách",
+    "Stream error details": "Chi tiết lỗi luồng",
+    "Error details": "Chi tiết lỗi",
+    "HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.": "HTTP 101 / handshake_complete chỉ xác nhận bắt tay WebSocket thành công. Hãy xem chi tiết lỗi kết nối và luồng để tìm nguyên nhân gián đoạn.",
     "Connection end": "Lý do kết thúc kết nối",
     "Connection reused": "Tái sử dụng kết nối",
     "Copy diagnostic JSON": "Sao chép JSON chẩn đoán",
@@ -7306,5 +7310,7 @@
     "Start time": "Thời gian bắt đầu",
     "End time": "Thời gian kết thúc",
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "Không có bắt tay mới cho lượt tạo này. Xem kết nối cha để kiểm tra kết nối thượng nguồn được dùng lại."
-  }
+  },
+  "WebSocket heartbeat": "Nhịp tim WebSocket",
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Định kỳ gửi khung Ping đến máy khách WebSocket của khóa này. Tắt nếu máy khách không tương thích. Thay đổi có hiệu lực sau khi kết nối lại."
 }

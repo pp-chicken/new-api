@@ -34,7 +34,8 @@ func (input *tokenAutoGroupsInput) UnmarshalJSON(data []byte) error {
 
 type tokenRequest struct {
 	model.Token
-	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
+	AutoGroups            tokenAutoGroupsInput `json:"auto_groups"`
+	WebSocketPingDisabled *bool                `json:"websocket_ping_disabled"`
 }
 
 type tokenResponse struct {
@@ -342,6 +343,9 @@ func AddToken(c *gin.Context) {
 		CrossGroupRetry:    token.CrossGroupRetry,
 		AutoGroups:         token.AutoGroups,
 	}
+	if request.WebSocketPingDisabled != nil {
+		cleanToken.WebSocketPingDisabled = *request.WebSocketPingDisabled
+	}
 	err = cleanToken.Insert()
 	if err != nil {
 		common.ApiError(c, err)
@@ -436,6 +440,9 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
+		if request.WebSocketPingDisabled != nil {
+			cleanToken.WebSocketPingDisabled = *request.WebSocketPingDisabled
+		}
 		if token.Group != "auto" {
 			cleanToken.CrossGroupRetry = false
 			_ = cleanToken.SetAutoGroups(nil)
@@ -469,6 +476,7 @@ func UpdateToken(c *gin.Context) {
 				(previous.AllowIps != nil && cleanToken.AllowIps != nil && *previous.AllowIps != *cleanToken.AllowIps)},
 			{"group", previous.Group != cleanToken.Group},
 			{"cross_group_retry", previous.CrossGroupRetry != cleanToken.CrossGroupRetry},
+			{"websocket_ping_disabled", previous.WebSocketPingDisabled != cleanToken.WebSocketPingDisabled},
 			{"auto_groups", previous.AutoGroups != cleanToken.AutoGroups},
 		} {
 			if field.changed {

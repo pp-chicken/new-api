@@ -34,6 +34,7 @@ export interface MonitoredUpstream {
   reused: boolean
   bytes: number
   end: string
+  error_detail?: string
 }
 
 export interface MonitorSocket {
@@ -44,6 +45,7 @@ export interface MonitorSocket {
   last_activity: string
   close_code: number
   error: string
+  error_detail?: string
 }
 
 export interface MonitoredRequest {
@@ -69,8 +71,10 @@ export interface MonitoredRequest {
   bytes: number
   state: 'running' | 'completed' | 'failed'
   client_error: string
+  client_error_detail?: string
   stream_end: string
   stream_outcome: string
+  stream_error?: string
   upstreams: MonitoredUpstream[] | null
   events: PolicyEvent[] | null
   truncated: boolean

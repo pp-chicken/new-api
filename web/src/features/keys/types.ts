@@ -44,6 +44,7 @@ export const apiKeySchema = z.object({
     .optional()
     .default(false),
   model_limits_enabled: z.boolean(),
+  websocket_ping_disabled: z.boolean().optional(),
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
 })
@@ -94,6 +95,7 @@ export interface ApiKeyFormData {
   group: string
   auto_groups: string[]
   cross_group_retry: boolean
+  websocket_ping_disabled?: boolean
 }
 
 export interface TokenAutoGroupsConfig {

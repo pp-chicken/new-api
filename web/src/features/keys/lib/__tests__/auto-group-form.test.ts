@@ -180,3 +180,21 @@ describe('API key Auto group form mapping', () => {
     )
   })
 })
+
+test('编辑密钥保留 WebSocket 心跳禁用配置并允许重新开启', () => {
+  const defaults = transformApiKeyToFormDefaults({
+    ...baseApiKey,
+    websocket_ping_disabled: true,
+  })
+  expect(defaults.websocket_ping_disabled).toBe(true)
+  expect(transformFormDataToPayload(defaults).websocket_ping_disabled).toBe(
+    true
+  )
+  expect(
+    transformFormDataToPayload({ ...defaults, websocket_ping_disabled: false })
+      .websocket_ping_disabled
+  ).toBe(false)
+  expect(
+    transformApiKeyToFormDefaults(baseApiKey).websocket_ping_disabled
+  ).toBe(false)
+})

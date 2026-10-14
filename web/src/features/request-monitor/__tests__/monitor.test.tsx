@@ -26,7 +26,7 @@ import { api } from '@/lib/api'
 import { RequestMonitor } from '..'
 import type { MonitoredRequest } from '../api'
 
-const request: MonitoredRequest = {
+const request = {
   id: 'request-123',
   started_at: '2026-10-12T08:00:00Z',
   duration_ms: 1234,
@@ -60,7 +60,7 @@ const request: MonitoredRequest = {
     },
   ],
   events: [],
-}
+} satisfies MonitoredRequest
 
 const clients: QueryClient[] = []
 function renderMonitor() {
@@ -110,6 +110,16 @@ it('筛选请求并打开 HTTP 200 但流中断的详情', async () => {
   expect(await within(dialog).findByText('unexpected_eof')).toBeVisible()
   expect(within(dialog).getByText('Failed')).toBeVisible()
   expect(within(dialog).getByText('scanner_error / —')).toBeVisible()
+  expect(
+    within(dialog).getByText('Stream error details').nextElementSibling
+  ).toHaveTextContent('—')
+  expect(
+    within(dialog).getByText('Client connection error details')
+      .nextElementSibling
+  ).toHaveTextContent('—')
+  expect(
+    within(dialog).getByRole('columnheader', { name: 'Error details' })
+  ).toBeVisible()
   expect(
     within(dialog).getByRole('button', { name: /Copy diagnostic JSON/ })
   ).toBeEnabled()
@@ -243,4 +253,114 @@ it('连接保持时展示独立的已完成生成，并可跳转详情和返回�
   expect(within(dialog).queryByText('Connection open')).not.toBeInTheDocument()
   await user.click(within(dialog).getByRole('button', { name: parent.id }))
   expect(await within(dialog).findByText('Connection open')).toBeVisible()
+})
+
+it('WebSocket 生成读取失败时展示具体流错误，并将错误详情复制到诊断 JSON', async () => {
+  const failed = {
+    ...request,
+    id: 'connection-1-ws-0',
+    parent_id: 'connection-1',
+    kind: 'ws_request',
+    stream_error: 'websocket: close 1006 (abnormal closure): unexpected EOF',
+    client_error: 'write_error',
+    client_error_detail: 'write tcp: broken pipe',
+    upstreams: [
+      {
+        ...request.upstreams[0],
+        method: 'GET',
+        status: 101,
+        protocol: 'WebSocket',
+        end: 'handshake_complete',
+      },
+    ],
+  } satisfies MonitoredRequest
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [failed], capacity: 500, instance: 'node-1' }
+          : failed,
+    },
+  }))
+  const user = userEvent.setup()
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: failed.id }))
+  const dialog = await screen.findByRole('dialog')
+  expect(await within(dialog).findByText(failed.stream_error)).toBeVisible()
+  expect(within(dialog).getByText(failed.client_error_detail)).toBeVisible()
+  expect(within(dialog).getByText('scanner_error / —')).toBeVisible()
+  expect(
+    within(dialog).getByText(
+      'HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.'
+    )
+  ).toBeVisible()
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Copy diagnostic JSON' })
+  )
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify(failed, null, 2))
+  )
+})
+
+it('WebSocket 连接失败时展示双方连接和上游错误详情，并允许长错误换行', async () => {
+  const socket = {
+    messages_in: 2,
+    messages_out: 3,
+    bytes_in: 100,
+    bytes_out: 200,
+    last_activity: '2026-10-13T08:00:00Z',
+    close_code: 1006,
+    error: 'unexpected_eof',
+  }
+  const parent: MonitoredRequest = {
+    ...request,
+    id: 'connection-1',
+    kind: 'websocket',
+    status: 101,
+    upstreams: [
+      {
+        ...request.upstreams[0],
+        error_detail: 'read tcp: connection reset by peer',
+      },
+    ],
+    websocket: {
+      client: { ...socket, error_detail: 'write tcp: broken pipe' },
+      upstream: {
+        ...socket,
+        error_detail:
+          'websocket: close 1006 (abnormal closure): unexpected EOF\nThe upstream connection closed before the response completed.',
+      },
+      close_source: 'upstream',
+      gateway_close_code: 1011,
+    },
+  }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [parent], capacity: 500, instance: 'node-1' }
+          : parent,
+    },
+  }))
+  const user = userEvent.setup()
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: parent.id }))
+  const dialog = await screen.findByRole('dialog')
+  expect(
+    await within(dialog).findByText('write tcp: broken pipe')
+  ).toBeVisible()
+  const upstreamError = within(dialog).getByText(
+    /The upstream connection closed/
+  )
+  expect(upstreamError).toBeVisible()
+  expect(upstreamError.parentElement).toHaveClass(
+    'whitespace-pre-wrap',
+    'break-all'
+  )
+  expect(
+    within(dialog).getByText('read tcp: connection reset by peer')
+  ).toBeVisible()
 })

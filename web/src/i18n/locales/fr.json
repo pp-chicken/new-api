@@ -7254,6 +7254,10 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Client connection error": "Erreur de connexion client",
+    "Client connection error details": "Détails de l’erreur de connexion client",
+    "Stream error details": "Détails de l’erreur du flux",
+    "Error details": "Détails de l’erreur",
+    "HTTP 101 / handshake_complete only confirms the WebSocket handshake. Check connection and stream error details for interruptions.": "HTTP 101 / handshake_complete confirme uniquement la négociation WebSocket. Consultez les détails des erreurs de connexion et de flux pour les interruptions.",
     "Connection end": "Fin de connexion",
     "Connection reused": "Connexion réutilisée",
     "Copy diagnostic JSON": "Copier le JSON de diagnostic",
@@ -7306,5 +7310,7 @@
     "Start time": "Heure de début",
     "End time": "Heure de fin",
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "Aucune nouvelle négociation pour cette génération. Consultez la connexion parente pour la connexion réutilisée."
-  }
+  },
+  "WebSocket heartbeat": "Battement de cœur WebSocket",
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Envoie régulièrement des trames Ping aux clients WebSocket de cette clé. Désactivez pour les clients incompatibles. Les modifications s’appliquent après reconnexion."
 }

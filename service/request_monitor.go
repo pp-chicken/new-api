@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 const RequestMonitorCapacity = 500
@@ -37,30 +39,33 @@ type MonitoredUpstream struct {
 	Reused      bool      `json:"reused"`
 	Bytes       int64     `json:"bytes"`
 	End         string    `json:"end"`
+	ErrorDetail string    `json:"error_detail,omitempty"`
 }
 
 type MonitoredRequest struct {
-	Kind          string              `json:"kind"`
-	ParentID      string              `json:"parent_id"`
-	WebSocket     *MonitorWebSocket   `json:"websocket,omitempty"`
-	ID            string              `json:"id"`
-	EndedAt       *time.Time          `json:"ended_at,omitempty"`
-	StartedAt     time.Time           `json:"started_at"`
-	DurationMS    int64               `json:"duration_ms"`
-	Method        string              `json:"method"`
-	Path          string              `json:"path"`
-	Model         string              `json:"model"`
-	UserID        int                 `json:"user_id"`
-	ChannelID     int                 `json:"channel_id"`
-	Status        int                 `json:"status"`
-	Bytes         int                 `json:"bytes"`
-	State         string              `json:"state"`
-	ClientError   string              `json:"client_error"`
-	StreamEnd     string              `json:"stream_end"`
-	StreamOutcome string              `json:"stream_outcome"`
-	Upstreams     []MonitoredUpstream `json:"upstreams"`
-	Events        []PolicyEvent       `json:"events"`
-	Truncated     bool                `json:"truncated"`
+	Kind              string              `json:"kind"`
+	ParentID          string              `json:"parent_id"`
+	WebSocket         *MonitorWebSocket   `json:"websocket,omitempty"`
+	ID                string              `json:"id"`
+	EndedAt           *time.Time          `json:"ended_at,omitempty"`
+	StartedAt         time.Time           `json:"started_at"`
+	DurationMS        int64               `json:"duration_ms"`
+	Method            string              `json:"method"`
+	Path              string              `json:"path"`
+	Model             string              `json:"model"`
+	UserID            int                 `json:"user_id"`
+	ChannelID         int                 `json:"channel_id"`
+	Status            int                 `json:"status"`
+	Bytes             int                 `json:"bytes"`
+	State             string              `json:"state"`
+	ClientError       string              `json:"client_error"`
+	ClientErrorDetail string              `json:"client_error_detail,omitempty"`
+	StreamEnd         string              `json:"stream_end"`
+	StreamOutcome     string              `json:"stream_outcome"`
+	StreamError       string              `json:"stream_error,omitempty"`
+	Upstreams         []MonitoredUpstream `json:"upstreams"`
+	Events            []PolicyEvent       `json:"events"`
+	Truncated         bool                `json:"truncated"`
 }
 
 type requestMonitorTrace struct {
@@ -124,8 +129,10 @@ func FinishRequestMonitor(c *gin.Context, writeErr error, panicked bool) {
 	d.Status, d.Bytes = c.Writer.Status(), max(0, c.Writer.Size())
 	d.State = "completed"
 	d.ClientError = monitorError(writeErr)
+	d.ClientErrorDetail = monitorErrorDetail(writeErr)
 	if err := c.Request.Context().Err(); err != nil {
 		d.ClientError = monitorError(err)
+		d.ClientErrorDetail = monitorErrorDetail(err)
 	}
 	if len(events) > 128 {
 		d.Truncated = true
@@ -156,6 +163,7 @@ func RecordMonitorStream(c *gin.Context, stream *relaycommon.StreamStatus) {
 	trace.streamFailed = !stream.IsNormalEnd() || stream.HasErrors() || (stream.ResponseOutcome() != "" && stream.ResponseOutcome() != "completed")
 	trace.data.StreamEnd = string(stream.EndReason)
 	trace.data.StreamOutcome = string(stream.ResponseOutcome())
+	trace.data.StreamError = monitorErrorDetail(stream.EndError)
 }
 
 func (trace *requestMonitorTrace) snapshot() MonitoredRequest {
@@ -230,6 +238,49 @@ func monitorError(err error) string {
 	return "transport_error"
 }
 
+// monitorErrorDetail 从错误类型重建诊断说明，不保留包装错误中的 URL、
+// 认证信息或对端自由文本。未知错误仍使用固定说明，避免将正文存入监看。
+func monitorErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		detail := &websocket.CloseError{Code: closeErr.Code}
+		// Gorilla 在连接未收到关闭帧就结束时生成这个固定错误。
+		if closeErr.Code == websocket.CloseAbnormalClosure && closeErr.Text == io.ErrUnexpectedEOF.Error() {
+			detail.Text = io.ErrUnexpectedEOF.Error()
+		}
+		return detail.Error()
+	}
+	for _, known := range []error{
+		context.Canceled, context.DeadlineExceeded, io.ErrUnexpectedEOF, io.EOF,
+		net.ErrClosed, syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.EPIPE,
+		websocket.ErrReadLimit, websocket.ErrBadHandshake, websocket.ErrCloseSent,
+		bufio.ErrTooLong,
+	} {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		switch {
+		case dnsErr.IsTimeout:
+			return "DNS lookup timed out"
+		case dnsErr.IsNotFound:
+			return "DNS host not found"
+		default:
+			return "DNS lookup failed"
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "network I/O timeout"
+	}
+	return "transport error (details omitted)"
+}
+
 type monitoredTransport struct {
 	base      http.RoundTripper
 	trace     *requestMonitorTrace
@@ -248,7 +299,7 @@ func MonitorRelayTransport(c *gin.Context, base http.RoundTripper) http.RoundTri
 	trace.mu.Lock()
 	// 总体流状态属于最新一次转发，前一次失败仍保留在上游明细和决策记录中。
 	trace.streamFailed = false
-	trace.data.StreamEnd, trace.data.StreamOutcome = "", ""
+	trace.data.StreamEnd, trace.data.StreamOutcome, trace.data.StreamError = "", "", ""
 	trace.data.UserID, trace.data.ChannelID = c.GetInt("id"), c.GetInt("channel_id")
 	model := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	trace.data.Model = model[:min(len(model), 256)]
@@ -287,6 +338,7 @@ func (t *monitoredTransport) RoundTrip(req *http.Request) (*http.Response, error
 	row.HeadersMS = time.Since(started).Milliseconds()
 	if err != nil {
 		row.End = monitorError(err)
+		row.ErrorDetail = monitorErrorDetail(err)
 		row.DurationMS = row.HeadersMS
 	}
 	if resp != nil {
@@ -320,6 +372,9 @@ func (b *monitoredBody) Read(p []byte) (int, error) {
 	row.DurationMS = time.Since(b.started).Milliseconds()
 	if err != nil {
 		row.End = monitorError(err)
+		if !errors.Is(err, io.EOF) {
+			row.ErrorDetail = monitorErrorDetail(err)
+		}
 	}
 	b.trace.mu.Unlock()
 	return n, err
@@ -335,6 +390,7 @@ func (b *monitoredBody) Close() error {
 	}
 	if err != nil {
 		row.End = monitorError(err)
+		row.ErrorDetail = monitorErrorDetail(err)
 	}
 	b.trace.mu.Unlock()
 	return err

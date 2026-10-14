@@ -131,10 +131,14 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 		maxMB = 128
 	}
 	client.SetReadLimit(int64(maxMB) << 20)
+	stopPing := startClientWSPing(ctx, client, c.GetBool(string(appconstant.ContextKeyTokenWebSocketPingDisabled)), func(error) {
+		s.shutdown(websocket.CloseInternalServerErr, "client heartbeat failed")
+	})
 	defer func() {
 		// Unless an earlier shutdown ended the read, the client closed or left.
 		// Gorilla already answered a client close frame, so this tells the upstream.
 		s.shutdown(websocket.CloseNormalClosure, "")
+		stopPing()
 		s.workers.Wait()
 	}()
 
