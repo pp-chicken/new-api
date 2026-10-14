@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -37,11 +38,20 @@ var responsesWSRequestEngine = sync.OnceValue(func() *gin.Engine {
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
 		c.Set(common.RequestIdKey, state.requestID)
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+		service.StartMonitorWSCall(c)
+		defer func() {
+			recovered := recover()
+			service.FinishRequestMonitor(c, nil, recovered != nil)
+			if recovered != nil {
+				panic(recovered)
+			}
+		}()
 		c.Next()
 	}, middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.ModelRequestRateLimit(), func(c *gin.Context) {
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
 		state.apiError = state.handle(c)
 		if state.apiError != nil {
+			service.RecordRequestPolicyTermination(c, state.apiError)
 			status := state.apiError.StatusCode
 			if status < http.StatusBadRequest {
 				status = http.StatusInternalServerError
@@ -119,6 +129,7 @@ func ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	defer ws.Close()
+	service.MonitorWSConnected(c)
 
 	if apiError := relay.ResponsesWebSocketHelper(c, ws, runner); apiError != nil {
 		logger.LogError(c, common.LogText("responses websocket relay error: %s", common.LocalLogPreview(apiError.Error())))

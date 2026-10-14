@@ -158,6 +158,12 @@ export function useSidebarData(): SidebarData {
             icon: CreditCard,
           },
           {
+            title: t('Request monitor'),
+            url: '/request-monitor',
+            icon: Activity,
+            requiredRole: ROLE.SUPER_ADMIN,
+          },
+          {
             title: t('System Info'),
             url: '/system-info',
             icon: ServerCog,

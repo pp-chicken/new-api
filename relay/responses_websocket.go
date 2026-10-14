@@ -140,6 +140,7 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 
 	for {
 		_, message, err := client.ReadMessage()
+		service.MonitorWSMessage(s.ctx, "client", true, len(message), err)
 		if err != nil {
 			return nil
 		}
@@ -202,8 +203,12 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		if outgoing != nil {
 			if err := s.client.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout)); err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
-			} else if err := s.client.WriteMessage(outgoing.kind, outgoing.body); err != nil {
-				state.closeCode = websocket.CloseInternalServerErr
+			} else {
+				err := s.client.WriteMessage(outgoing.kind, outgoing.body)
+				service.MonitorWSMessage(s.ctx, "client", false, len(outgoing.body), err)
+				if err != nil {
+					state.closeCode = websocket.CloseInternalServerErr
+				}
 			}
 		}
 		if state.closeCode != 0 {
@@ -245,6 +250,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if info == nil && modelName != "" {
 			info = &relaycommon.RelayInfo{OriginModelName: modelName, UsingGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), StartTime: started}
 		}
+		if info != nil {
+			service.RecordMonitorStream(c, info.StreamStatus)
+		}
 		perfmetrics.RecordRelayResult(c.Request.Context(), info, apiErr)
 		// Settlement already marks the request policy successful, and nothing
 		// reads a termination decision after this point on the WebSocket path,
@@ -263,6 +271,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		return apiErr
 	}
 	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
+	service.UpdateMonitorRequestIdentity(c)
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 
@@ -363,6 +372,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		}
 	}
 
+	service.UpdateMonitorRequestIdentity(c)
 	accumulator := service.NewResponsesUsageAccumulator(info)
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	info.StreamStatus.RequireTerminal()
@@ -632,6 +642,7 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 	s.workers.Go(func() {
 		for {
 			kind, body, err := target.ReadMessage()
+			service.MonitorWSMessage(s.ctx, "upstream", true, len(body), err)
 			incoming := responsesWSMessage{kind: kind, body: body, err: err}
 			if state := s.getCurrent(); state != nil {
 				select {
@@ -707,7 +718,9 @@ func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
 	if err := target.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout)); err != nil {
 		return err
 	}
-	return target.WriteMessage(kind, message)
+	err := target.WriteMessage(kind, message)
+	service.MonitorWSMessage(s.ctx, "upstream", false, len(message), err)
+	return err
 }
 
 func (s *responsesWSSession) writeClient(kind int, message []byte) error {
@@ -716,7 +729,9 @@ func (s *responsesWSSession) writeClient(kind int, message []byte) error {
 	if err := s.client.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout)); err != nil {
 		return err
 	}
-	return s.client.WriteMessage(kind, message)
+	err := s.client.WriteMessage(kind, message)
+	service.MonitorWSMessage(s.ctx, "client", false, len(message), err)
+	return err
 }
 
 func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.NewAPIError) {
@@ -735,6 +750,7 @@ func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.N
 // data writer, so shutdown takes no write lock and never waits for workers.
 func (s *responsesWSSession) shutdown(code int, reason string) {
 	s.closeOnce.Do(func() {
+		service.MonitorWSShutdown(s.ctx, code)
 		s.cancel()
 		s.connectionMu.Lock()
 		target, unregister := s.target, s.unregister

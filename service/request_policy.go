@@ -127,6 +127,7 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 }
 
 func MarkRequestPolicySuccess(c *gin.Context, stream *relaycommon.StreamStatus) {
+	RecordMonitorStream(c, stream)
 	state := RequestPolicy(c)
 	if state.OutcomeRecorded {
 		return

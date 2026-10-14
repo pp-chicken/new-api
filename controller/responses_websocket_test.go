@@ -40,6 +40,7 @@ var responsesWSTestUserSequence atomic.Int64
 
 func setupResponsesWSRequestTest(t *testing.T) (*model.User, *model.Token) {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	previousDB := model.DB
 	previousLogDB := model.LOG_DB
 	previousType := common.MainDatabaseType()
@@ -406,7 +407,9 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 	engine := gin.New()
 	engine.GET("/v1/responses", middleware.TokenAuth(), func(c *gin.Context) {
 		defer close(fixture.done)
-		c.Set(common.RequestIdKey, "responses-ws-billing")
+		c.Set(common.RequestIdKey, common.NewRequestId())
+		service.StartRequestMonitor(c)
+		defer service.FinishRequestMonitor(c, nil, false)
 		ResponsesWebSocket(c)
 	})
 	engine.POST("/v1/responses", middleware.TokenAuth(), middleware.ModelRequestRateLimit(), middleware.Distribute(), func(c *gin.Context) {
@@ -561,6 +564,7 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		}
 	})
 	client, user, token := fixture.client, fixture.user, fixture.token
+	var monitorParentID string
 
 	for index, payload := range []string{
 		`{"type":"response.create","model":"ws-billing","input":"first","service_tier":"default"}`,
@@ -579,6 +583,36 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		require.NoError(t, common.Unmarshal(data, &terminal))
 		require.Equal(t, "response.completed", terminal.Type, "unexpected response: %s", data)
 		assert.Equal(t, fmt.Sprintf("resp_%d", index+1), terminal.Response.ID)
+		var call service.MonitoredRequest
+		for _, row := range service.RequestMonitorSnapshots() {
+			if row.Kind == "ws_request" && row.UserID == user.Id {
+				call = row
+				break
+			}
+		}
+		require.Equal(t, "completed", call.State)
+		assert.Equal(t, "completed", call.StreamOutcome)
+		assert.Equal(t, "ws-billing", call.Model)
+		require.NotEmpty(t, call.ParentID)
+		if index == 0 {
+			monitorParentID = call.ParentID
+		} else {
+			assert.Equal(t, monitorParentID, call.ParentID)
+		}
+		for _, row := range service.RequestMonitorSnapshots() {
+			if row.ID != monitorParentID {
+				continue
+			}
+			assert.Equal(t, "running", row.State)
+			assert.Empty(t, row.StreamOutcome)
+			assert.Equal(t, 101, row.Status)
+			require.NotNil(t, row.WebSocket)
+			assert.GreaterOrEqual(t, row.WebSocket.Client.MessagesIn, int64(index+1))
+			assert.Positive(t, row.WebSocket.Upstream.BytesIn)
+			require.Len(t, row.Upstreams, 1)
+			assert.Equal(t, 101, row.Upstreams[0].Status)
+		}
+
 		observed := <-received
 		assert.Equal(t, "Bearer upstream-first", observed.Authorization)
 		assert.Equal(t, "gpt-4o", observed.Model)
@@ -610,7 +644,7 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	require.Len(t, logs, 2)
 	for index, expectedQuota := range []int{1000, 2000} {
 		assert.Equal(t, expectedQuota, logs[index].Quota)
-		assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), logs[index].RequestId)
+		assert.Equal(t, fmt.Sprintf("%s-ws-%d", monitorParentID, index), logs[index].RequestId)
 		assert.Equal(t, 1000, logs[index].PromptTokens)
 		assert.Equal(t, 10, logs[index].CompletionTokens)
 	}
@@ -1211,6 +1245,38 @@ func TestResponsesWebSocketCloseCodes(t *testing.T) {
 			assert.Equal(t, tc.code, closeErr.Code)
 			assert.Equal(t, tc.reason, closeErr.Text)
 			fixture.closeAndWait(t)
+			var connection service.MonitoredRequest
+			for _, row := range service.RequestMonitorSnapshots() {
+				if row.Kind == "websocket" && row.UserID == fixture.user.Id {
+					connection = row
+					break
+				}
+			}
+			require.NotNil(t, connection.WebSocket)
+			assert.Equal(t, tc.code, connection.WebSocket.GatewayCloseCode)
+			assert.NotEmpty(t, connection.WebSocket.CloseSource)
+			switch tc.name {
+			case "client closes":
+				assert.Equal(t, "client", connection.WebSocket.CloseSource)
+				assert.Equal(t, websocket.CloseNormalClosure, connection.WebSocket.Client.CloseCode)
+			case "idle upstream goes away":
+				assert.Equal(t, "upstream", connection.WebSocket.CloseSource)
+				assert.Equal(t, websocket.CloseGoingAway, connection.WebSocket.Upstream.CloseCode)
+			case "channel disabled", "token revoked":
+				assert.Equal(t, "gateway", connection.WebSocket.CloseSource)
+			}
+
+			assert.NotEqual(t, "running", connection.State)
+			assert.NotNil(t, connection.EndedAt)
+			if tc.code == websocket.CloseNormalClosure || tc.code == websocket.CloseGoingAway {
+				assert.Equal(t, "completed", connection.State)
+			} else {
+				assert.Equal(t, "failed", connection.State)
+			}
+			serialized, marshalErr := common.Marshal(connection)
+			require.NoError(t, marshalErr)
+			assert.NotContains(t, string(serialized), "upstream-first")
+			assert.NotContains(t, string(serialized), "upstream shutdown")
 			assertResponsesWSAccounting(t, fixture, []int{1000})
 			if tc.upstreamCode != 0 {
 				require.Len(t, upstreamCodes, 1)

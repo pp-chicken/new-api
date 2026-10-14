@@ -132,6 +132,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			resultErr = types.NewError(fmt.Errorf("relay panic: %v", recovered), types.ErrorCodeBadResponse)
 		}
 		if relayFormat != types.RelayFormatOpenAIRealtime {
+			service.RecordMonitorStream(c, relayInfo.StreamStatus)
 			perfmetrics.RecordRelayResult(c.Request.Context(), relayInfo, resultErr)
 		}
 		if recovered != nil {

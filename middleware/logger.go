@@ -13,6 +13,10 @@ const RouteTagKey = "route_tag"
 func RouteTag(tag string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set(RouteTagKey, tag)
+		if tag == "relay" {
+			monitorRelayRequest(c)
+			return
+		}
 		c.Next()
 	}
 }
