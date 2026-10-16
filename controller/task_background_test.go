@@ -52,7 +52,7 @@ func TestBackgroundImageLifecycleDatabase(t *testing.T) {
 	require.NoError(t, err)
 	plugin, err := pluginruntime.CompilePlugin(source, pluginruntime.Options{})
 	require.NoError(t, err)
-	for index, mode := range []string{"success", "http_error", "truncated", "timeout", "expired_race"} {
+	for index, mode := range []string{"success", "http_error", "sse_error", "wrong_content_type", "truncated", "timeout", "expired_race"} {
 		t.Run(mode, func(t *testing.T) {
 			if mode == "timeout" {
 				t.Setenv("TASK_BACKGROUND_TIMEOUT_SECONDS", "1")
@@ -72,6 +72,7 @@ func TestBackgroundImageLifecycleDatabase(t *testing.T) {
 					return
 				}
 				body["request_path"] = r.URL.Path
+				body["content_length"] = r.ContentLength
 				received <- body
 				select {
 				case <-gate:
@@ -79,10 +80,20 @@ func TestBackgroundImageLifecycleDatabase(t *testing.T) {
 					return
 				}
 				if mode == "http_error" {
-					http.Error(w, "secret upstream details", 500)
+					w.Header().Set("X-Request-Id", "upstream-123")
+					http.Error(w, `{"error":{"code":"rate_limit_exceeded","message":"quota exceeded"},"api_key":"DO_NOT_EXPOSE"}`, 429)
+					return
+				}
+				if mode == "wrong_content_type" {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{"error":{"message":"expected SSE"}}`)
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
+				if mode == "sse_error" {
+					fmt.Fprint(w, "data: {\"error\":{\"code\":\"invalid_image\",\"message\":\"unsupported image\"},\"b64_json\":\"DO_NOT_EXPOSE\"}\n\n")
+					return
+				}
 				if mode == "timeout" {
 					w.(http.Flusher).Flush()
 					<-r.Context().Done()
@@ -131,6 +142,7 @@ func TestBackgroundImageLifecycleDatabase(t *testing.T) {
 			select {
 			case body := <-received:
 				assert.Equal(t, true, body["stream"])
+				assert.Positive(t, body["content_length"].(int64))
 				assert.Equal(t, "/v1/images/generations", body["request_path"])
 				assert.Equal(t, "gpt-image-2.5-sunburst", body["model"])
 			case <-time.After(5 * time.Second):
@@ -183,6 +195,74 @@ func TestBackgroundImageLifecycleDatabase(t *testing.T) {
 			assert.Equal(t, int32(1), calls.Load(), "失败及重启清理不可重发生图请求")
 			require.NoError(t, db.Where("task_id = ?", info.PublicTaskID).First(&stored).Error)
 			assert.Equal(t, wantQuota, stored.Quota)
+			queryRecorder := httptest.NewRecorder()
+			queryContext, _ := gin.CreateTestContext(queryRecorder)
+			queryContext.Set("id", user.Id)
+			queryContext.Params = gin.Params{{Key: "key", Value: stored.TaskID}}
+			GetTask(queryContext)
+			require.Equal(t, http.StatusOK, queryRecorder.Code)
+			var public map[string]any
+			require.NoError(t, common.Unmarshal(queryRecorder.Body.Bytes(), &public))
+			assert.NotContains(t, queryRecorder.Body.String(), "DO_NOT_EXPOSE")
+			assert.NotContains(t, public, "diagnostics")
+			if mode == "success" {
+				assert.NotContains(t, public, "error")
+			} else {
+				failure, ok := public["error"].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, public["fail_reason"], failure["message"])
+				switch mode {
+				case "http_error":
+					assert.Equal(t, "rate_limit_exceeded", failure["code"])
+					assert.Equal(t, "quota exceeded", failure["message"])
+					assert.Equal(t, float64(429), failure["upstream_status"])
+				case "sse_error":
+					assert.Equal(t, "invalid_image", failure["code"])
+					assert.Equal(t, "unsupported image", failure["message"])
+					assert.Equal(t, float64(200), failure["upstream_status"])
+				case "timeout", "expired_race":
+					assert.Equal(t, "task_timeout", failure["code"])
+				}
+			}
+			foreignRecorder := httptest.NewRecorder()
+			foreignContext, _ := gin.CreateTestContext(foreignRecorder)
+			foreignContext.Set("id", user.Id+10000)
+			foreignContext.Params = queryContext.Params
+			GetTask(foreignContext)
+			assert.Equal(t, http.StatusNotFound, foreignRecorder.Code)
+			if mode != "expired_race" {
+				diagnostic := stored.PrivateData.Diagnostics
+				require.NotNil(t, diagnostic)
+				for _, role := range []int{common.RoleCommonUser, common.RoleAdminUser} {
+					view := tasksToDto([]*model.Task{&stored}, false, role)[0]
+					assert.Nil(t, view.RootInfo)
+					serialized, err := common.Marshal(view)
+					require.NoError(t, err)
+					assert.NotContains(t, string(serialized), "request_body")
+				}
+				root := tasksToDto([]*model.Task{&stored}, false, common.RoleRootUser)[0]
+				require.NotNil(t, root.RootInfo)
+				assert.Equal(t, diagnostic, root.RootInfo.Diagnostics)
+				assert.Contains(t, diagnostic.RequestBody, "一只猫")
+				assert.Equal(t, "POST", diagnostic.Method)
+				assert.NotContains(t, diagnostic.ResponseBody, "DO_NOT_EXPOSE")
+				assert.NotContains(t, diagnostic.ResponseBody, encoded)
+				switch mode {
+				case "http_error":
+					assert.Equal(t, 429, diagnostic.StatusCode)
+					assert.Equal(t, "upstream_error", diagnostic.ErrorCode)
+					assert.Contains(t, diagnostic.ResponseBody, "rate_limit_exceeded")
+					assert.Equal(t, "upstream-123", diagnostic.UpstreamRequestID)
+				case "sse_error":
+					assert.Contains(t, diagnostic.ResponseBody, "invalid_image")
+					assert.Equal(t, "last_sse_event", diagnostic.ResponseKind)
+					assert.NotEmpty(t, diagnostic.ErrorMessage)
+				case "wrong_content_type":
+					assert.Contains(t, diagnostic.ResponseBody, "expected SSE")
+				case "truncated", "timeout":
+					assert.NotEmpty(t, diagnostic.ErrorCode)
+				}
+			}
 			if mode == "success" {
 				assert.Contains(t, string(stored.Data), encoded)
 				adaptor := relay.GetTaskAdaptor("openai-image")

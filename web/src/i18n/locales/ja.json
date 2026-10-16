@@ -7312,5 +7312,16 @@
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "今回の生成には新しいハンドシェイク記録がありません。再利用された上流接続は親接続で確認してください。"
   },
   "WebSocket heartbeat": "WebSocket ハートビート",
-  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "このキーの WebSocket クライアントに定期的に Ping を送信します。非対応のクライアントでは無効にしてください。変更は再接続後に適用されます。"
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "このキーの WebSocket クライアントに定期的に Ping を送信します。非対応のクライアントでは無効にしてください。変更は再接続後に適用されます。",
+  "HTTP Status Code": "HTTP ステータスコード",
+  "No response received": "応答を受信していません",
+  "Last SSE Event": "最後の SSE イベント",
+  "Diagnostic bodies are redacted and limited to 16 KiB. Image data is omitted. Streams show the last received event.": "本文は機密情報を除去し、16 KiB に制限されます。画像データは省略し、ストリームでは最後のイベントを表示します。",
+  "No request diagnostics were recorded for this task.": "このタスクのリクエスト診断は記録されていません。",
+  "Request URL": "リクエスト URL",
+  "Request Body": "リクエスト本文",
+  "Response Body": "レスポンス本文",
+  "Error Code": "エラーコード",
+  "Error Message": "エラーメッセージ",
+  "Upstream Request ID": "上流リクエスト ID"
 }

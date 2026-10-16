@@ -7312,5 +7312,16 @@
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "Нет нового рукопожатия для этой генерации. Повторное соединение указано в родительской записи."
   },
   "WebSocket heartbeat": "Пульс WebSocket",
-  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Периодически отправляет кадры Ping клиентам WebSocket этого ключа. Отключите для несовместимых клиентов. Изменения применяются после переподключения."
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Периодически отправляет кадры Ping клиентам WebSocket этого ключа. Отключите для несовместимых клиентов. Изменения применяются после переподключения.",
+  "HTTP Status Code": "Код HTTP",
+  "No response received": "Ответ не получен",
+  "Last SSE Event": "Последнее событие SSE",
+  "Diagnostic bodies are redacted and limited to 16 KiB. Image data is omitted. Streams show the last received event.": "Тела очищены от секретов и ограничены 16 КиБ. Изображения исключены. Для потоков показано последнее событие.",
+  "No request diagnostics were recorded for this task.": "Для этой задачи диагностика запроса не записана.",
+  "Request URL": "URL запроса",
+  "Request Body": "Тело запроса",
+  "Response Body": "Тело ответа",
+  "Error Code": "Код ошибки",
+  "Error Message": "Сообщение об ошибке",
+  "Upstream Request ID": "ID запроса к провайдеру"
 }

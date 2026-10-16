@@ -54,7 +54,7 @@ func GetTask(c *gin.Context) {
 	if task.Status == model.TaskStatusSuccess && taskFailReasonIsLegacyResultURL(task.FailReason) {
 		failReason = ""
 	}
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"task_id":     task.TaskID,
 		"platform":    task.Platform,
 		"status":      task.Status,
@@ -62,7 +62,15 @@ func GetTask(c *gin.Context) {
 		"fail_reason": failReason,
 		"created_at":  createdAt,
 		"finished_at": task.FinishTime,
-	})
+	}
+	if task.Status == model.TaskStatusFailure {
+		if task.PrivateData.Failure != nil {
+			response["error"] = task.PrivateData.Failure
+		} else if task.PrivateData.BackgroundDeadline > 0 && task.FailReason == "Task timed out" {
+			response["error"] = &types.TaskFailure{Code: "task_timeout", Message: "Task timed out"}
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func GetTaskArtifacts(c *gin.Context) {
@@ -490,6 +498,7 @@ func tasksToDto(tasks []*model.Task, fillUser bool, viewerRole int) []*dto.TaskD
 		}
 		if viewerRole >= common.RoleRootUser {
 			rootInfo := &dto.TaskRootInfo{
+				Diagnostics:    task.PrivateData.Diagnostics,
 				UpstreamTaskID: task.PrivateData.UpstreamTaskID,
 				NodeName:       task.PrivateData.NodeName,
 			}
@@ -503,7 +512,7 @@ func tasksToDto(tasks []*model.Task, fillUser bool, viewerRole int) []*dto.TaskD
 					}
 				}
 			}
-			if rootInfo.TaskPlugin != nil || rootInfo.UpstreamTaskID != "" || rootInfo.NodeName != "" {
+			if rootInfo.Diagnostics != nil || rootInfo.TaskPlugin != nil || rootInfo.UpstreamTaskID != "" || rootInfo.NodeName != "" {
 				item.RootInfo = rootInfo
 			}
 		}

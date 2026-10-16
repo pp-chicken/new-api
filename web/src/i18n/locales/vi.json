@@ -7312,5 +7312,16 @@
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "Không có bắt tay mới cho lượt tạo này. Xem kết nối cha để kiểm tra kết nối thượng nguồn được dùng lại."
   },
   "WebSocket heartbeat": "Nhịp tim WebSocket",
-  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Định kỳ gửi khung Ping đến máy khách WebSocket của khóa này. Tắt nếu máy khách không tương thích. Thay đổi có hiệu lực sau khi kết nối lại."
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Định kỳ gửi khung Ping đến máy khách WebSocket của khóa này. Tắt nếu máy khách không tương thích. Thay đổi có hiệu lực sau khi kết nối lại.",
+  "HTTP Status Code": "Mã trạng thái HTTP",
+  "No response received": "Chưa nhận được phản hồi",
+  "Last SSE Event": "Sự kiện SSE cuối cùng",
+  "Diagnostic bodies are redacted and limited to 16 KiB. Image data is omitted. Streams show the last received event.": "Nội dung đã ẩn thông tin nhạy cảm và giới hạn 16 KiB. Bỏ qua dữ liệu ảnh. Luồng hiển thị sự kiện cuối cùng.",
+  "No request diagnostics were recorded for this task.": "Tác vụ này chưa ghi thông tin chẩn đoán yêu cầu.",
+  "Request URL": "URL yêu cầu",
+  "Request Body": "Nội dung yêu cầu",
+  "Response Body": "Nội dung phản hồi",
+  "Error Code": "Mã lỗi",
+  "Error Message": "Thông báo lỗi",
+  "Upstream Request ID": "ID yêu cầu thượng nguồn"
 }

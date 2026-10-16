@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"github.com/QuantumNous/new-api/types"
 )
 
 type TaskError struct {
@@ -86,6 +87,7 @@ type TaskAdminInfo struct {
 }
 
 type TaskRootInfo struct {
+	Diagnostics    *types.TaskDiagnostics `json:"diagnostics,omitempty"`
 	TaskPlugin     *TaskPluginRuntimeInfo `json:"task_plugin,omitempty"`
 	UpstreamTaskID string                 `json:"upstream_task_id,omitempty"`
 	NodeName       string                 `json:"node_name,omitempty"`

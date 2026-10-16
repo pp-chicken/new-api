@@ -7312,5 +7312,16 @@
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "此次生成未记录新的握手。若复用了上游连接，请查看所属连接的握手信息。"
   },
   "WebSocket heartbeat": "WebSocket 心跳",
-  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "定时向此密钥的 WebSocket 客户端发送 Ping。不兼容的客户端可关闭，修改后重新连接生效。"
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "定时向此密钥的 WebSocket 客户端发送 Ping。不兼容的客户端可关闭，修改后重新连接生效。",
+  "HTTP Status Code": "HTTP 状态码",
+  "No response received": "未收到响应",
+  "Last SSE Event": "最后一个 SSE 事件",
+  "Diagnostic bodies are redacted and limited to 16 KiB. Image data is omitted. Streams show the last received event.": "诊断正文已脱敏，最多保留 16 KiB，图片数据已省略。流式响应显示最后收到的事件。",
+  "No request diagnostics were recorded for this task.": "此任务未记录请求诊断信息。",
+  "Request URL": "请求地址",
+  "Request Body": "请求体",
+  "Response Body": "响应体",
+  "Error Code": "错误码",
+  "Error Message": "错误信息",
+  "Upstream Request ID": "上游请求 ID"
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,7 +36,7 @@ func TestBackgroundImageDiagnostics(t *testing.T) {
 	plugin, err := pluginruntime.CompilePlugin(source, pluginruntime.Options{Log: func(message string) { output.WriteString(message) }})
 	require.NoError(t, err)
 	for _, tc := range []struct{ name, media, body, diagnostic string }{
-		{"非流响应", "application/json", `{"secret":"DO_NOT_LOG"}`, "stage=content_type"},
+		{"不支持的响应类型", "text/html", `{"secret":"DO_NOT_LOG"}`, "stage=content_type"},
 		{"提前结束", "text/event-stream", "data: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"DO_NOT_LOG\"}\n\n", "stage=eof_before_completion"},
 		{"错误事件", "text/event-stream", "data: {\"error\":{\"message\":\"DO_NOT_LOG\"}}\n\n", "reason=upstream_error_event"},
 		{"无效JSON", "text/event-stream", "data: DO_NOT_LOG\n\n", "reason=invalid_json"},
@@ -166,5 +167,45 @@ func TestBackgroundImageInlineArtifacts(t *testing.T) {
 				require.Error(t, err)
 			}
 		})
+	}
+}
+
+func TestBackgroundDiagnosticRedaction(t *testing.T) {
+	a := &TaskAdaptor{submit: &requestDescriptor{Headers: map[string]string{"Authorization": "Bearer channel-private-key"}}}
+	for _, body := range []string{
+		`{"prompt":"a cat","nested":{"api_key":"DO_NOT_EXPOSE"},"b64_json":"DO_NOT_EXPOSE","message":"channel-private-key"}`,
+		`{"api_key":"DO_NOT_EXPOSE","broken":`,
+		`{"token":"DO_NOT_EXPOSE","broken":`,
+		`upstream rejected Bearer channel-private-key api_key=DO_NOT_EXPOSE`,
+		`{"url":"https://example.com/image?token=DO_NOT_EXPOSE","image":"data:image/png;base64,DO_NOT_EXPOSE"}`,
+	} {
+		result := a.diagnosticBody(body)
+		assert.NotContains(t, result, "DO_NOT_EXPOSE")
+		assert.NotContains(t, result, "channel-private-key")
+	}
+	assert.Contains(t, a.diagnosticBody(`{"error":{"code":"invalid_image","message":"unsupported format"}}`), "invalid_image")
+	result := a.diagnosticBody(strings.Repeat("文", 20000))
+	assert.LessOrEqual(t, len(result), (16<<10)+len("\n[TRUNCATED]"))
+	assert.Contains(t, result, "[TRUNCATED]")
+}
+
+func TestPublicBackgroundFailure(t *testing.T) {
+	for _, tc := range []struct{ body, message, code string }{
+		{`{"error":{"code":"invalid_image","message":"bad image Bearer channel-private-key https://private.example/path?secret=value"}}`, "bad image [REDACTED] [URL REDACTED]", "invalid_image"},
+		{`{"message":"try later","code":"rate_limit"}`, "try later", "rate_limit"},
+		{`<html>private stack</html>`, "", ""},
+		{`{"error":{"message":"<html>private stack</html>"}}`, "", ""},
+		{`{"error":{"message":"failed","code":{"secret":"no"}}}`, "failed", "upstream_error"},
+	} {
+		a := &TaskAdaptor{diagnostics: &types.TaskDiagnostics{StatusCode: 429}, submit: &requestDescriptor{Headers: map[string]string{"Authorization": "Bearer channel-private-key"}}}
+		a.captureTaskFailure(tc.body)
+		if tc.message == "" {
+			assert.Nil(t, a.TaskFailure())
+			continue
+		}
+		require.NotNil(t, a.TaskFailure())
+		assert.Equal(t, tc.message, a.TaskFailure().Message)
+		assert.Equal(t, tc.code, a.TaskFailure().Code)
+		assert.Equal(t, 429, a.TaskFailure().UpstreamStatus)
 	}
 }

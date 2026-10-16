@@ -33,6 +33,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -112,6 +113,8 @@ func (a *TaskAdaptor) resultLimit() int {
 }
 
 type TaskAdaptor struct {
+	failure        *types.TaskFailure
+	diagnostics    *types.TaskDiagnostics
 	plugin         *pluginruntime.LoadedPlugin
 	info           *relaycommon.RelayInfo
 	submit         *requestDescriptor
@@ -507,11 +510,51 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, bod
 		c.Request.Method = strings.ToUpper(a.submit.Method)
 		defer func() { c.Request.Method = originalMethod }()
 	}
-	return channel.DoTaskApiRequest(a, c, info, body)
+	if a.plugin.Meta.SubmitMode == "background" && a.submit != nil {
+		// 后台提交已限制为 4 MiB；复制实际发送的 JSON，保留原始传输内容。
+		captured, err := io.ReadAll(io.LimitReader(body, 4<<20+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(captured) > 4<<20 {
+			return nil, fmt.Errorf("background request body exceeds size limit")
+		}
+		// 保留 bytes.Reader，确保 HTTP Content-Length 与原请求一致。
+		body = bytes.NewReader(captured)
+		endpoint, _ := url.Parse(a.submit.URL)
+		endpoint.User, endpoint.RawQuery, endpoint.Fragment = nil, "", ""
+		a.diagnostics = &types.TaskDiagnostics{Method: c.Request.Method, URL: endpoint.String(), RequestBody: a.diagnosticBody(string(captured))}
+	}
+	resp, err := channel.DoTaskApiRequest(a, c, info, body)
+	if a.diagnostics != nil {
+		if err != nil {
+			a.diagnostics.ErrorMessage = a.diagnosticBody(err.Error())
+		}
+		if resp != nil {
+			a.diagnostics.StatusCode = resp.StatusCode
+			a.diagnostics.UpstreamRequestID = a.diagnosticBody(resp.Header.Get("X-Request-Id"))
+			if resp.Body != nil && resp.StatusCode/100 != 2 {
+				captured, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10+1))
+				a.diagnostics.ResponseKind = "body"
+				a.diagnostics.ResponseBody = a.diagnosticBody(string(captured))
+				a.captureTaskFailure(string(captured))
+				if readErr != nil {
+					a.diagnostics.ErrorMessage = a.diagnosticBody(readErr.Error())
+				}
+			}
+		}
+	}
+	return resp, err
 }
 
 func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (_ *channel.TaskSubmitResponse, taskErr *dto.TaskError) {
 	started := time.Now()
+	defer func() {
+		if a.diagnostics != nil && taskErr != nil {
+			a.diagnostics.ErrorCode = taskErr.Code
+			a.diagnostics.ErrorMessage = a.diagnosticBody(taskErr.Message)
+		}
+	}()
 	var responseBody any
 	var err error
 	streaming := a.submit != nil && a.submit.ResponseType == "sse"
@@ -1599,6 +1642,14 @@ func (a *TaskAdaptor) validateResolvedUsageValue(value any, usageSchema map[stri
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, item := range typed {
+			// Images 编辑请求的 images 数组是输入引用，不是同名的输出张数用量。
+			// 只在请求校验中区分数组；extractUsage 的计费事实仍必须为数字。
+			if images, ok := item.([]any); key == "images" && ok {
+				if err := a.validateResolvedUsageValue(images, usageSchema); err != nil {
+					return err
+				}
+				continue
+			}
 			limit, canonical := canonicalUsageLimit(key)
 			// A duration of -1 asks the vendor to pick the length. Plugins that
 			// declare duration-auto@1 reserve the longest duration for it and

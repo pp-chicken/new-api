@@ -20,6 +20,10 @@ import { Shield01Icon, Wrench01Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useTranslation } from 'react-i18next'
 
+import {
+  CodeBlock,
+  CodeBlockCopyButton,
+} from '@/components/ai-elements/code-block'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge } from '@/components/status-badge'
 import { Label } from '@/components/ui/label'
@@ -88,6 +92,7 @@ export function TaskDetailsDialog(props: TaskDetailsDialogProps) {
   const plugin = access.plugin
   const runtime = access.runtime
   const properties = props.log.properties
+  const diagnostic = props.isRoot ? props.log.root_info?.diagnostics : undefined
 
   return (
     <Dialog
@@ -238,6 +243,71 @@ export function TaskDetailsDialog(props: TaskDetailsDialogProps) {
               />
             }
           >
+            {diagnostic ? (
+              <>
+                <DetailRow
+                  label={t('Request URL')}
+                  value={`${diagnostic.method} ${diagnostic.url}`}
+                  mono
+                />
+                <DetailRow
+                  label={t('HTTP Status Code')}
+                  value={diagnostic.status_code || t('No response received')}
+                  mono
+                />
+                {diagnostic.error_code ? (
+                  <DetailRow
+                    label={t('Error Code')}
+                    value={diagnostic.error_code}
+                    mono
+                  />
+                ) : null}
+                {diagnostic.error_message ? (
+                  <DetailRow
+                    label={t('Error Message')}
+                    value={diagnostic.error_message}
+                  />
+                ) : null}
+                {diagnostic.upstream_request_id ? (
+                  <DetailRow
+                    label={t('Upstream Request ID')}
+                    value={diagnostic.upstream_request_id}
+                    mono
+                  />
+                ) : null}
+                <p className='text-muted-foreground text-xs'>
+                  {t(
+                    'Diagnostic bodies are redacted and limited to 16 KiB. Image data is omitted. Streams show the last received event.'
+                  )}
+                </p>
+                <CodeBlock
+                  code={diagnostic.request_body || '-'}
+                  language='json'
+                  title={t('Request Body')}
+                  showToolbar
+                  maxExpandedLines={20}
+                >
+                  <CodeBlockCopyButton />
+                </CodeBlock>
+                <CodeBlock
+                  code={diagnostic.response_body || t('No response received')}
+                  language='json'
+                  title={t(
+                    diagnostic.response_kind === 'last_sse_event'
+                      ? 'Last SSE Event'
+                      : 'Response Body'
+                  )}
+                  showToolbar
+                  maxExpandedLines={20}
+                >
+                  <CodeBlockCopyButton />
+                </CodeBlock>
+              </>
+            ) : (
+              <p className='text-muted-foreground text-xs'>
+                {t('No request diagnostics were recorded for this task.')}
+              </p>
+            )}
             {runtime ? (
               <>
                 <DetailRow

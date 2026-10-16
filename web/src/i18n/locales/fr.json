@@ -7312,5 +7312,16 @@
     "No new handshake for this generation. Check the parent connection for reused upstream connections.": "Aucune nouvelle négociation pour cette génération. Consultez la connexion parente pour la connexion réutilisée."
   },
   "WebSocket heartbeat": "Battement de cœur WebSocket",
-  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Envoie régulièrement des trames Ping aux clients WebSocket de cette clé. Désactivez pour les clients incompatibles. Les modifications s’appliquent après reconnexion."
+  "Send periodic Ping frames to this key’s WebSocket clients. Disable for incompatible clients. Changes apply after reconnecting.": "Envoie régulièrement des trames Ping aux clients WebSocket de cette clé. Désactivez pour les clients incompatibles. Les modifications s’appliquent après reconnexion.",
+  "HTTP Status Code": "Code HTTP",
+  "No response received": "Aucune réponse reçue",
+  "Last SSE Event": "Dernier événement SSE",
+  "Diagnostic bodies are redacted and limited to 16 KiB. Image data is omitted. Streams show the last received event.": "Les corps sont expurgés et limités à 16 Kio. Les images sont omises. Le dernier événement reçu est affiché pour les flux.",
+  "No request diagnostics were recorded for this task.": "Aucun diagnostic de requête enregistré pour cette tâche.",
+  "Request URL": "URL de requête",
+  "Request Body": "Corps de requête",
+  "Response Body": "Corps de réponse",
+  "Error Code": "Code d’erreur",
+  "Error Message": "Message d’erreur",
+  "Upstream Request ID": "ID de requête en amont"
 }

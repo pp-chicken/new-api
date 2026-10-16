@@ -355,6 +355,17 @@ export interface TaskLog {
     task_plugin?: TaskPluginRuntimeInfo
     upstream_task_id?: string
     node_name?: string
+    diagnostics?: {
+      method: string
+      url: string
+      status_code: number
+      request_body: string
+      response_body: string
+      response_kind: string
+      error_code?: string
+      error_message?: string
+      upstream_request_id?: string
+    }
   }
   created_at?: number
   updated_at?: number

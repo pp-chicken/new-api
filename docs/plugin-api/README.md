@@ -164,9 +164,47 @@ Base URL（例如 `https://provider.example`，不要重复添加 `/v1`）、密
 发送 `stream: true`。使用 `GET /v1/tasks/:taskId` 查询；`SUCCESS` 后通过
 `GET /v1/tasks/:taskId/artifacts` 获取图片内容链接。查询和下载沿用现有用户隔离和令牌认证。
 
-上游必须返回 OpenAI Images SSE 的 `image_generation.completed` 事件，携带
-`b64_json` 或 HTTP(S) `url`；预览事件不保存。此插件只处理 JSON 文生图，不接管同步图片接口。
+上游可返回 OpenAI Images SSE 的 `image_generation.completed`（文生图）或
+`image_edit.completed`（编辑）事件，携带 `b64_json` 或 HTTP(S) `url`；预览事件不保存。
+此插件处理 JSON 异步文生图和图片编辑，不接管同步图片接口。
 单任务最终 JSON 图片结果最多 32 MiB，请求体最多 4 MiB。
+
+### 异步图片编辑（v1.2.0）
+
+升级时需同时部署包含本次 `images` 数组校验修复的宿主程序，并启用 v1.2.0 插件；
+只替换插件脚本、继续使用旧宿主，会因 `images` 与计费用量字段同名而被数字校验拒绝。
+
+仍向 `POST /v1/tasks/openai-image` 提交 JSON，携带 `images` 数组时自动进入编辑模式，
+也可显式指定 `action: "image_to_image"`（兼容 `"edit"`）。后台会向上游
+`/v1/images/edits` 发送 `stream: true`，任务查询和图片下载方式与文生图相同。
+
+```json
+{
+  "model": "gpt-image-1.5",
+  "action": "image_to_image",
+  "prompt": "保留主体，把背景换成蓝色",
+  "images": [{ "image_url": "https://example.com/input.png" }],
+  "n": 1,
+  "output_format": "png"
+}
+```
+
+- `images` 必须包含 1 到 16 个图片引用，每个引用只能提供 `image_url` 或 `file_id` 中的一项。
+- `image_url` 支持 HTTP(S) URL 或 `data:image/png;base64,...`、JPEG、WebP Data URL。
+  URL 由上游读取，需确保上游可访问；本地文件需先由客户端编码为 Data URL。
+- `file_id` 必须是当前渠道上游可访问的已上传文件 ID，插件不会上传文件或转换文件 ID。
+- 可选 `mask` 使用同样的引用对象格式，例如 `{"image_url":"https://example.com/mask.png"}`。
+  遮罩格式、尺寸以及模型是否支持遮罩由上游校验。
+- `size`、`quality`、`background`、`input_fidelity` 等参数继续透传，由上游判断模型支持情况。
+- 此异步入口不接收 `multipart/form-data` 或 `image` 文件字段。整个 JSON 请求仍受 4 MiB 限制，
+  Base64 编码也计入该限制；较大图片请使用 URL 或上游文件 ID。
+- 上游需支持 [OpenAI 图片编辑 JSON 请求及 SSE 响应](https://developers.openai.com/api/reference/resources/images/methods/edit)。
+  只支持 multipart 编辑的上游不能直接用于此插件。
+
+自 v1.2.1 起，宿主兼容普通 `application/json` 图片结果，以及声明 `text/event-stream`
+但在可选心跳注释之后直接返回完整 JSON 的上游。仅在尚未出现 SSE 字段时启用 JSON 兜底，
+响应大小仍受结果上限约束；必须同时更新宿主及插件。返回结果必须包含数量与 `n` 一致的
+`data` 数组，各项包含 `b64_json` 或 HTTP(S) `url`。错误对象、截断 JSON 和混合协议响应不会判为成功。
 
 `submitMode: "background"` 仅允许通用任务接口及 `per_task` 模式，不可声明
 `routes` 或 `protocols`。`TASK_BACKGROUND_CONCURRENCY` 默认 8，表示每进程同时运行上限；
@@ -185,6 +223,12 @@ Base URL（例如 `https://provider.example`，不要重复添加 `/v1`）、密
 `plugin_hook` 表示插件事件校验失败，`accumulation` 表示结果累积校验失败。
 `reason` 进一步区分空闲超时、无效 JSON、上游错误事件和图片字段缺失等固定类别。
 日志不包含请求体、响应体、原始异常、凭证或图片内容。
+
+当 SSE 未解析出任何事件就失败时，后台诊断的响应正文会保存 `sse_framing_summary`
+结构摘要。`data_lines`、`event_lines`、`blank_lines` 分别表示识别到的数据行、事件名行和空行；
+`pending_data_lines` 表示尚未由空行结束的数据行数；`unknown_lines` 和 `indented_lines`
+用于识别非标准字段或缩进。`first_content=json_like` 仅说明首个有效内容看起来以 JSON 开头，
+不代表已验证为有效 JSON。日志也包含这些字段，所有值均为计数或固定类别，不含原始响应内容。
 
 `openai-image` v1.1.1 还通过 `console.log` 输出有数量限制的事件摘要；该日志遵循宿主
 `DEBUG=true` 开关。通常先查看无需 DEBUG 的宿主摘要；全局 DEBUG 会同时启用其他模块的调试日志。
