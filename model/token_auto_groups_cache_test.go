@@ -1,7 +1,9 @@
 package model
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +30,37 @@ func TestTokenAutoGroupsRoundTripThroughRedisHashCache(t *testing.T) {
 	groups, err := cached.GetAutoGroups()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"vip", "default"}, groups)
+}
+
+func TestTokenAllowUserQuotaQueryRoundTripsThroughRedisHashCache(t *testing.T) {
+	for _, allowQuery := range []bool{false, true} {
+		for _, disablePing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("查询额度=%t/禁用心跳=%t", allowQuery, disablePing), func(t *testing.T) {
+				server := useUserCacheMiniRedis(t)
+				token := Token{Id: 43, UserId: 7, Key: "token-user-quota-cache-key", Name: "user-quota-cache", AllowUserQuotaQuery: allowQuery, WebSocketPingDisabled: disablePing}
+				initialized, err := cacheInitToken(token)
+				require.NoError(t, err)
+				require.Equal(t, 1, initialized)
+				cached, err := cacheGetTokenByKey(token.Key)
+				require.NoError(t, err)
+				assert.Equal(t, allowQuery, cached.AllowUserQuotaQuery)
+				assert.Equal(t, disablePing, cached.WebSocketPingDisabled)
+				expectedTTL := time.Duration(tokenCacheTTLSeconds()) * time.Second
+				assert.Equal(t, expectedTTL, server.TTL(getTokenCacheKey(token.Key)))
+				server.FastForward(time.Second)
+				token.AllowUserQuotaQuery = !allowQuery
+				token.WebSocketPingDisabled = !disablePing
+				initialized, err = cacheInitToken(token)
+				require.NoError(t, err)
+				require.Equal(t, 2, initialized)
+				cached, err = cacheGetTokenByKey(token.Key)
+				require.NoError(t, err)
+				assert.Equal(t, allowQuery, cached.AllowUserQuotaQuery)
+				assert.Equal(t, disablePing, cached.WebSocketPingDisabled)
+				assert.Equal(t, expectedTTL, server.TTL(getTokenCacheKey(token.Key)))
+			})
+		}
+	}
 }
 
 func TestTokenUpdateSynchronouslyNarrowsPreheatedAutoGroupsCache(t *testing.T) {

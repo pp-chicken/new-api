@@ -31,6 +31,8 @@ type Token struct {
 	WebSocketPingDisabled bool           `json:"websocket_ping_disabled" gorm:"column:websocket_ping_disabled;not null;default:false"`
 	AutoGroups            string         `json:"-" gorm:"type:text"`
 	DeletedAt             gorm.DeletedAt `gorm:"index"`
+	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
+	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
 }
 
 func (token *Token) GetAutoGroups() ([]string, error) {
@@ -314,7 +316,8 @@ func (token *Token) Update() (err error) {
 		common.SysLog(common.LogText("failed to invalidate token cache before update: %s", cacheErr.Error()))
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups", "websocket_ping_disabled").Updates(token).Error
+		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups",
+		"allow_user_quota_query", "websocket_ping_disabled").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {

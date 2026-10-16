@@ -292,3 +292,24 @@ test('WebSocket 心跳默认开启，关闭后为新密钥提交禁用配置', a
   await waitFor(() => expect(createdPayloads).toHaveLength(1))
   expect(createdPayloads[0]?.websocket_ping_disabled).toBe(true)
 })
+
+describe('API keys mutate drawer user quota query switch', () => {
+  test('sends false for a new key after the switch, which starts on, is turned off', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer()
+
+    fireEvent.click(findButton('Advanced Settings', true))
+    const quotaQuerySwitch = await screen.findByRole('switch', {
+      name: 'Allow querying user quota',
+    })
+    expect(quotaQuerySwitch).toBeChecked()
+    fireEvent.click(quotaQuerySwitch)
+    expect(quotaQuerySwitch).not.toBeChecked()
+
+    changeInput(getControlByLabel('Name'), 'no-user-quota')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+    expect(createdPayloads[0]?.allow_user_quota_query).toBe(false)
+  })
+})
