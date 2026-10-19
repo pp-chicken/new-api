@@ -361,8 +361,8 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 			return nil, service.TaskErrorWrapperLocal(errors.New("background task capacity reached"), "task_capacity_exceeded", http.StatusTooManyRequests)
 		}
 		// 在请求清理中间件运行前复制完整上游请求体，不持有临时文件或客户端 Writer。
-		body, readErr := io.ReadAll(io.LimitReader(requestBody, 4<<20+1))
-		if readErr != nil || len(body) > 4<<20 {
+		body, readErr := io.ReadAll(io.LimitReader(requestBody, constant.MaxBackgroundTaskRequestBodyBytes+1))
+		if readErr != nil || len(body) > constant.MaxBackgroundTaskRequestBodyBytes {
 			release()
 			return nil, service.TaskErrorWrapperLocal(errors.New("background request body exceeds size limit"), "invalid_request", http.StatusRequestEntityTooLarge)
 		}

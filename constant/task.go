@@ -1,5 +1,8 @@
 package constant
 
+// MaxBackgroundTaskRequestBodyBytes 是后台任务完整上游请求体的上限：12.5 MiB。
+const MaxBackgroundTaskRequestBodyBytes = 25 * (1 << 19)
+
 type TaskPlatform string
 
 const (

@@ -167,7 +167,7 @@ Base URL（例如 `https://provider.example`，不要重复添加 `/v1`）、密
 上游可返回 OpenAI Images SSE 的 `image_generation.completed`（文生图）或
 `image_edit.completed`（编辑）事件，携带 `b64_json` 或 HTTP(S) `url`；预览事件不保存。
 此插件处理 JSON 异步文生图和图片编辑，不接管同步图片接口。
-单任务最终 JSON 图片结果最多 32 MiB，请求体最多 4 MiB。
+单任务最终 JSON 图片结果最多 32 MiB，请求体最多 12.5 MiB。
 
 ### 异步图片编辑（v1.2.0）
 
@@ -196,7 +196,7 @@ Base URL（例如 `https://provider.example`，不要重复添加 `/v1`）、密
 - 可选 `mask` 使用同样的引用对象格式，例如 `{"image_url":"https://example.com/mask.png"}`。
   遮罩格式、尺寸以及模型是否支持遮罩由上游校验。
 - `size`、`quality`、`background`、`input_fidelity` 等参数继续透传，由上游判断模型支持情况。
-- 此异步入口不接收 `multipart/form-data` 或 `image` 文件字段。整个 JSON 请求仍受 4 MiB 限制，
+- 此异步入口不接收 `multipart/form-data` 或 `image` 文件字段。整个 JSON 请求仍受 12.5 MiB 限制，
   Base64 编码也计入该限制；较大图片请使用 URL 或上游文件 ID。
 - 上游需支持 [OpenAI 图片编辑 JSON 请求及 SSE 响应](https://developers.openai.com/api/reference/resources/images/methods/edit)。
   只支持 multipart 编辑的上游不能直接用于此插件。

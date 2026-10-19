@@ -516,12 +516,12 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, bod
 		defer func() { c.Request.Method = originalMethod }()
 	}
 	if a.plugin.Meta.SubmitMode == "background" && a.submit != nil {
-		// 后台提交已限制为 4 MiB；复制实际发送的 JSON，保留原始传输内容。
-		captured, err := io.ReadAll(io.LimitReader(body, 4<<20+1))
+		// 后台提交已限制为 12.5 MiB；复制实际发送的 JSON，保留原始传输内容。
+		captured, err := io.ReadAll(io.LimitReader(body, constant.MaxBackgroundTaskRequestBodyBytes+1))
 		if err != nil {
 			return nil, err
 		}
-		if len(captured) > 4<<20 {
+		if len(captured) > constant.MaxBackgroundTaskRequestBodyBytes {
 			return nil, fmt.Errorf("background request body exceeds size limit")
 		}
 		// 保留 bytes.Reader，确保 HTTP Content-Length 与原请求一致。
