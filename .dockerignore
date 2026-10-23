@@ -10,3 +10,6 @@ docs
 /web/node_modules
 /web/dist
 !THIRD-PARTY-LICENSES.md
+/artifacts/docker
+*.tar.gz
+*.tar.gz.tmp.*

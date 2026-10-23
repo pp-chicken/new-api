@@ -44,3 +44,6 @@ relaykit/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
 go.work
 go.work.sum
+
+# 本地导出的 Docker 镜像包
+/artifacts/docker/
