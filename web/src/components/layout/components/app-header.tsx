@@ -21,6 +21,7 @@ import { LanguageSwitcher } from '@/components/language-switcher'
 import { NotificationPopover } from '@/components/notification-popover'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
+import { Badge } from '@/components/ui/badge'
 import { SystemUpdateAction } from '@/features/system-update/system-update-action'
 import { useNotifications } from '@/hooks/use-notifications'
 import { useTopNavLinks } from '@/hooks/use-top-nav-links'
@@ -115,6 +116,8 @@ export function AppHeader({
     <Header>
       <div className='@container/system-brand flex min-w-0 flex-1 items-center gap-1'>
         <SystemBrand variant='inline' />
+        {/* 临时部署校验标记，用于验证同一镜像标签的更新。 */}
+        <Badge variant='outline'>20261023-A</Badge>
         <SystemUpdateAction presentation='version' />
       </div>
 

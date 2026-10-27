@@ -52,6 +52,7 @@ usage() {
 
 推送前请自行通过 docker login 登录目标仓库。
 镜像标签不会改写项目 VERSION 文件。
+程序版本优先读取非空 VERSION 文件，否则使用 Git 版本标识；无 Git 信息时使用 v0.0.0-dev。
 EOF
 }
 
@@ -135,6 +136,18 @@ if [[ "$export_image" == true ]]; then
 fi
 command_args=(docker buildx build --file "$project_dir/Dockerfile"
   --platform "$platform" --tag "$image_ref" --progress plain)
+if [[ "$save_only" == false ]]; then
+  build_version=""
+  if [[ -f "$project_dir/VERSION" ]]; then
+    build_version="$(tr -d '[:space:]' < "$project_dir/VERSION")"
+  fi
+  if [[ -z "$build_version" ]] && command -v git >/dev/null 2>&1; then
+    # 仅匹配主项目发布标签，避免将 relaykit/tokenkit 子模块标签当作程序版本。
+    build_version="$(git -C "$project_dir" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || true)"
+  fi
+  build_version="${build_version:-v0.0.0-dev}"
+  command_args+=(--build-arg "VERSION=$build_version")
+fi
 if [[ "$push" == true ]]; then
   command_args+=(--push)
 else
@@ -149,6 +162,7 @@ command_args+=("$project_dir")
 printf '镜像：%s\n' "$image_ref"
 if [[ "$save_only" == false ]]; then
   printf '平台：%s\n' "$platform"
+  printf '程序版本：%s\n' "$build_version"
 fi
 if [[ -n "$proxy" ]]; then
   printf '已为 Docker CLI 启用指定代理（地址不输出，避免泄露代理凭据）。\n'
