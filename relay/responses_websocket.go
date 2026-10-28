@@ -69,11 +69,11 @@ type responsesWSMessage struct {
 	err  error
 }
 
-// responsesWSControl is a client control event (response.cancel) whose
+// responsesWSControl is a client control event (response.cancel or response.interrupt) whose
 // envelope the read loop already parsed.
 type responsesWSControl struct {
-	body              []byte
-	eventID, streamID string
+	body                         []byte
+	eventID, streamID, eventType string
 }
 
 // Only the request worker reads or changes billing state. Socket readers pass
@@ -161,12 +161,15 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 			// Controls are owned by the active request too. In particular a cancel
 			// arriving during authentication must not precede its upstream create.
 			state := s.getCurrent()
-			if eventType != "response.cancel" || state == nil {
+			if eventType == "response.interrupt" && state == nil {
+				continue
+			}
+			if (eventType != "response.cancel" && eventType != "response.interrupt") || state == nil {
 				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(fmt.Errorf("unsupported websocket event %q", eventType)))
 				continue
 			}
 			select {
-			case state.controls <- responsesWSControl{body: message, eventID: envelope.EventID, streamID: streamID}:
+			case state.controls <- responsesWSControl{body: message, eventID: envelope.EventID, streamID: streamID, eventType: eventType}:
 			case <-state.done:
 			case <-s.ctx.Done():
 				return nil
@@ -506,6 +509,15 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				pendingControl = nil
 			}
 		case control := <-state.controls:
+			// A late interrupt must not reserve a control slot for the next response.
+			if control.eventType == "response.interrupt" && s.lastResponseID != "" {
+				var interrupt struct {
+					ResponseID string `json:"response_id"`
+				}
+				if common.Unmarshal(control.body, &interrupt) == nil && interrupt.ResponseID == s.lastResponseID {
+					continue
+				}
+			}
 			if pendingControl != nil || sentControl != nil {
 				s.sendError(control.eventID, control.streamID, newResponsesWSInvalidRequestError(errors.New("a response control event is already pending")))
 				continue
