@@ -474,6 +474,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					if rejected.StatusCode < 400 || rejected.StatusCode > 599 {
 						rejected.StatusCode = http.StatusBadRequest
 					}
+					// 初始拒绝也要保留协议错误详情；不送入用量累加器，保持预扣退款路径。
+					service.ObserveResponsesOutcome(info, &event.ResponsesStreamResponse, incoming.body)
+					info.StreamStatus.MarkFailed(string(rejected.GetErrorCode()), rejection.Error.Type, rejection.Status)
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 					return rejected
 				}
 				if strings.HasPrefix(event.Type, "response.") {

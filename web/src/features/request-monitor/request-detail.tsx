@@ -59,6 +59,17 @@ export function RequestDetail(props: {
     gcTime: 0,
   })
   const data = detail.data
+  const streamDetails = data?.stream_details
+  const diagnosticFields = [
+    { label: t('Incomplete reason'), value: streamDetails?.incomplete_reason },
+    { label: t('Upstream event'), value: streamDetails?.event },
+    { label: t('Response ID'), value: streamDetails?.response_id },
+    { label: t('Error code'), value: streamDetails?.error_code },
+    { label: t('Error type'), value: streamDetails?.error_type },
+    { label: t('Upstream error status'), value: streamDetails?.error_status },
+    { label: t('Error parameter'), value: streamDetails?.error_param },
+    { label: t('Upstream error message'), value: streamDetails?.error_message },
+  ]
   const columns: StaticDataTableColumn<MonitoredUpstream>[] = [
     { id: 'attempt', header: t('Attempt'), cell: (_, index) => index + 1 },
     { id: 'channel', header: t('Channel ID'), cell: (row) => row.channel_id },
@@ -280,7 +291,19 @@ export function RequestDetail(props: {
               </dd>
             </div>
           </dl>
-          {data.truncated && (
+          {streamDetails && (
+            <dl className='grid grid-cols-1 gap-3 text-sm sm:grid-cols-2'>
+              {diagnosticFields.map((field) => (
+                <div key={field.label} className='min-w-0 sm:col-span-2'>
+                  <dt className='text-muted-foreground'>{field.label}</dt>
+                  <dd className='break-all whitespace-pre-wrap'>
+                    {field.value || '—'}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {(data.truncated || streamDetails?.truncated) && (
             <p className='text-amber-700 dark:text-amber-400'>
               {t('Some diagnostic events were truncated to limit memory use.')}
             </p>

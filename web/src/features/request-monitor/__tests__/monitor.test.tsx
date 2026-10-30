@@ -304,6 +304,73 @@ it('WebSocket 生成读取失败时展示具体流错误，并将错误详情复
   )
 })
 
+it.each([
+  {
+    outcome: 'incomplete',
+    details: {
+      event: 'response.incomplete',
+      response_id: 'resp-limit',
+      incomplete_reason: 'max_output_tokens',
+    },
+    visible: ['response.incomplete', 'resp-limit', 'max_output_tokens'],
+  },
+  {
+    outcome: 'failed',
+    details: {
+      event: 'error',
+      error_code: 'rate_limit_exceeded',
+      error_type: 'rate_limit_error',
+      error_status: 429,
+      error_message: 'Too many requests.\nPlease retry later.',
+      error_param: 'model',
+      truncated: true,
+    },
+    visible: ['rate_limit_exceeded', 'rate_limit_error', '429', 'model'],
+  },
+])('展示 $outcome 的协议诊断并复制完整 JSON', async (testCase) => {
+  const failed = {
+    ...request,
+    kind: 'ws_request',
+    stream_end: 'done',
+    stream_outcome: testCase.outcome,
+    stream_details: testCase.details,
+  }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [failed], capacity: 500, instance: 'node-1' }
+          : failed,
+    },
+  }))
+  const user = userEvent.setup()
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: failed.id }))
+  const dialog = await screen.findByRole('dialog')
+  for (const value of testCase.visible) {
+    expect(await within(dialog).findByText(value)).toBeVisible()
+  }
+  if (testCase.details.error_message) {
+    expect(within(dialog).getByText(/Too many requests/)).toHaveClass(
+      'whitespace-pre-wrap',
+      'break-all'
+    )
+    expect(
+      within(dialog).getByText(
+        'Some diagnostic events were truncated to limit memory use.'
+      )
+    ).toBeVisible()
+  }
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Copy diagnostic JSON' })
+  )
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify(failed, null, 2))
+  )
+})
+
 it('WebSocket 连接失败时展示双方连接和上游错误详情，并允许长错误换行', async () => {
   const socket = {
     messages_in: 2,

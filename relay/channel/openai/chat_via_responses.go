@@ -92,7 +92,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 		if streamResp.Response != nil {
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
-		service.ObserveResponsesOutcome(info, &streamResp)
+		service.ObserveResponsesOutcome(info, &streamResp, []byte(data))
 		accumulator.ProcessEvent(&streamResp)
 		switch streamResp.Type {
 		case "response.completed", "response.done", "response.incomplete":

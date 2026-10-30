@@ -8,6 +8,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/tokenkit"
 )
 
@@ -39,7 +40,7 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 		a.info.ObserveResponseModel(event.Response.Model)
 	}
 	a.started = true
-	ObserveResponsesOutcome(a.info, event)
+	ObserveResponsesOutcome(a.info, event, raw)
 	switch event.Type {
 	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		if event.Response != nil {
@@ -116,9 +117,9 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 }
 
 // ObserveResponsesOutcome records the protocol outcome of one Responses event
-// on the stream status for health classification. Only codes and types are
-// kept; messages never leave the event.
-func ObserveResponsesOutcome(info *relaycommon.RelayInfo, event *dto.ResponsesStreamResponse) {
+// on the stream status for health classification. 脱敏后的错误详情独立保存，
+// 不进入健康分类或消费日志。
+func ObserveResponsesOutcome(info *relaycommon.RelayInfo, event *dto.ResponsesStreamResponse, raw []byte) {
 	if info == nil || info.StreamStatus == nil || event == nil {
 		return
 	}
@@ -126,18 +127,48 @@ func ObserveResponsesOutcome(info *relaycommon.RelayInfo, event *dto.ResponsesSt
 	if event.Response != nil {
 		_ = common.Unmarshal(event.Response.Status, &responseStatus)
 	}
+	detail := relaycommon.StreamDiagnostic{Event: event.Type}
+	if event.Response != nil {
+		detail.ResponseID = event.Response.ID
+	}
 	switch {
 	case event.Type == "error" || event.Type == "response.failed" || event.Type == "response.error" || responseStatus == "failed":
-		code, errorType := event.Code, ""
+		code, errorType, status := event.Code, "", 0
+		detail.ErrorMessage, detail.ErrorParam = event.Message, event.Param
 		if event.Response != nil {
 			if oaiErr := event.Response.GetOpenAIError(); oaiErr != nil {
 				if oaiErr.Code != nil {
 					code = fmt.Sprint(oaiErr.Code)
 				}
 				errorType = oaiErr.Type
+				detail.ErrorMessage, detail.ErrorParam = oaiErr.Message, oaiErr.Param
 			}
 		}
-		info.StreamStatus.MarkFailed(code, errorType, 0)
+		if event.Type == "error" && len(raw) > 0 {
+			// WebSocket 的错误对象嵌套在 error，SSE 的错误字段通常平铺。
+			var envelope struct {
+				Status     int                `json:"status"`
+				ResponseID string             `json:"response_id"`
+				Error      *types.OpenAIError `json:"error"`
+			}
+			if common.Unmarshal(raw, &envelope) == nil {
+				status = envelope.Status
+				if envelope.ResponseID != "" {
+					detail.ResponseID = envelope.ResponseID
+				}
+				if envelope.Error != nil {
+					if envelope.Error.Code != nil {
+						code = fmt.Sprint(envelope.Error.Code)
+					}
+					errorType = envelope.Error.Type
+					detail.ErrorMessage = envelope.Error.Message
+					if envelope.Error.Param != "" {
+						detail.ErrorParam = envelope.Error.Param
+					}
+				}
+			}
+		}
+		info.StreamStatus.MarkFailed(code, errorType, status)
 	case event.Type == "response.incomplete" || responseStatus == "incomplete":
 		reason := ""
 		if event.Response != nil && event.Response.IncompleteDetails != nil {
@@ -148,7 +179,20 @@ func ObserveResponsesOutcome(info *relaycommon.RelayInfo, event *dto.ResponsesSt
 		info.StreamStatus.MarkCancelled()
 	case event.Type == "response.completed" || event.Type == "response.done" || responseStatus == "completed":
 		info.StreamStatus.MarkCompleted()
+		return
+	default:
+		return
 	}
+	apiKey := ""
+	if info.ChannelMeta != nil {
+		apiKey = info.ApiKey
+	}
+	for _, value := range []*string{&detail.Event, &detail.ResponseID, &detail.ErrorMessage, &detail.ErrorParam} {
+		cleaned, truncated := monitorDiagnosticText(*value, apiKey)
+		*value = cleaned
+		detail.Truncated = detail.Truncated || truncated
+	}
+	info.StreamStatus.RecordDiagnostic(detail)
 }
 
 func ApplyResponsesUsage(dst *dto.Usage, src *dto.Usage) {

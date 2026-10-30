@@ -129,7 +129,7 @@ func TestObserveResponsesOutcomeRecordsProtocolFacts(t *testing.T) {
 			var event dto.ResponsesStreamResponse
 			require.NoError(t, common.UnmarshalJsonStr(tc.event, &event))
 			info := &relaycommon.RelayInfo{StreamStatus: relaycommon.NewStreamStatus()}
-			ObserveResponsesOutcome(info, &event)
+			ObserveResponsesOutcome(info, &event, nil)
 			outcome := info.StreamStatus.OutcomeSnapshot()
 			assert.Equal(t, tc.wantOutcome, outcome.Response)
 			assert.Equal(t, tc.wantCode, outcome.ErrorCode)

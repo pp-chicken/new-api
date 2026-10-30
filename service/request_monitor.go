@@ -8,10 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -43,29 +46,30 @@ type MonitoredUpstream struct {
 }
 
 type MonitoredRequest struct {
-	Kind              string              `json:"kind"`
-	ParentID          string              `json:"parent_id"`
-	WebSocket         *MonitorWebSocket   `json:"websocket,omitempty"`
-	ID                string              `json:"id"`
-	EndedAt           *time.Time          `json:"ended_at,omitempty"`
-	StartedAt         time.Time           `json:"started_at"`
-	DurationMS        int64               `json:"duration_ms"`
-	Method            string              `json:"method"`
-	Path              string              `json:"path"`
-	Model             string              `json:"model"`
-	UserID            int                 `json:"user_id"`
-	ChannelID         int                 `json:"channel_id"`
-	Status            int                 `json:"status"`
-	Bytes             int                 `json:"bytes"`
-	State             string              `json:"state"`
-	ClientError       string              `json:"client_error"`
-	ClientErrorDetail string              `json:"client_error_detail,omitempty"`
-	StreamEnd         string              `json:"stream_end"`
-	StreamOutcome     string              `json:"stream_outcome"`
-	StreamError       string              `json:"stream_error,omitempty"`
-	Upstreams         []MonitoredUpstream `json:"upstreams"`
-	Events            []PolicyEvent       `json:"events"`
-	Truncated         bool                `json:"truncated"`
+	Kind              string                        `json:"kind"`
+	ParentID          string                        `json:"parent_id"`
+	WebSocket         *MonitorWebSocket             `json:"websocket,omitempty"`
+	ID                string                        `json:"id"`
+	EndedAt           *time.Time                    `json:"ended_at,omitempty"`
+	StartedAt         time.Time                     `json:"started_at"`
+	DurationMS        int64                         `json:"duration_ms"`
+	Method            string                        `json:"method"`
+	Path              string                        `json:"path"`
+	Model             string                        `json:"model"`
+	UserID            int                           `json:"user_id"`
+	ChannelID         int                           `json:"channel_id"`
+	Status            int                           `json:"status"`
+	Bytes             int                           `json:"bytes"`
+	State             string                        `json:"state"`
+	ClientError       string                        `json:"client_error"`
+	ClientErrorDetail string                        `json:"client_error_detail,omitempty"`
+	StreamEnd         string                        `json:"stream_end"`
+	StreamOutcome     string                        `json:"stream_outcome"`
+	StreamError       string                        `json:"stream_error,omitempty"`
+	StreamDetails     *relaycommon.StreamDiagnostic `json:"stream_details,omitempty"`
+	Upstreams         []MonitoredUpstream           `json:"upstreams"`
+	Events            []PolicyEvent                 `json:"events"`
+	Truncated         bool                          `json:"truncated"`
 }
 
 type requestMonitorTrace struct {
@@ -164,12 +168,26 @@ func RecordMonitorStream(c *gin.Context, stream *relaycommon.StreamStatus) {
 	trace.data.StreamEnd = string(stream.EndReason)
 	trace.data.StreamOutcome = string(stream.ResponseOutcome())
 	trace.data.StreamError = monitorErrorDetail(stream.EndError)
+	detail := stream.DiagnosticSnapshot()
+	for _, value := range []*string{&detail.Event, &detail.ResponseID, &detail.ErrorCode, &detail.ErrorType, &detail.ErrorMessage, &detail.ErrorParam, &detail.IncompleteReason} {
+		cleaned, truncated := monitorDiagnosticText(*value, common.GetContextKeyString(c, constant.ContextKeyChannelKey), c.GetHeader("Authorization"))
+		*value = cleaned
+		detail.Truncated = detail.Truncated || truncated
+	}
+	trace.data.StreamDetails = nil
+	if detail != (relaycommon.StreamDiagnostic{}) {
+		trace.data.StreamDetails = &detail
+	}
 }
 
 func (trace *requestMonitorTrace) snapshot() MonitoredRequest {
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
 	data := trace.data
+	if data.StreamDetails != nil {
+		detail := *data.StreamDetails
+		data.StreamDetails = &detail
+	}
 	if data.WebSocket != nil {
 		ws := *data.WebSocket
 		data.WebSocket = &ws
@@ -281,6 +299,28 @@ func monitorErrorDetail(err error) string {
 	return "transport error (details omitted)"
 }
 
+var monitorCredentialPattern = regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[^\s"',;]+|\bsk-[a-z0-9_-]+|(?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)`)
+
+// monitorDiagnosticText 只处理协议错误字段，不保存完整响应、输出或请求正文。
+func monitorDiagnosticText(value string, secrets ...string) (string, bool) {
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[redacted]")
+		}
+	}
+	value = monitorCredentialPattern.ReplaceAllString(value, "[redacted]")
+	value = common.MaskSensitiveInfo(value)
+	const maxBytes = 4096
+	if len(value) <= maxBytes {
+		return value, false
+	}
+	end := maxBytes
+	for !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + "…", true
+}
+
 type monitoredTransport struct {
 	base      http.RoundTripper
 	trace     *requestMonitorTrace
@@ -300,6 +340,7 @@ func MonitorRelayTransport(c *gin.Context, base http.RoundTripper) http.RoundTri
 	// 总体流状态属于最新一次转发，前一次失败仍保留在上游明细和决策记录中。
 	trace.streamFailed = false
 	trace.data.StreamEnd, trace.data.StreamOutcome, trace.data.StreamError = "", "", ""
+	trace.data.StreamDetails = nil
 	trace.data.UserID, trace.data.ChannelID = c.GetInt("id"), c.GetInt("channel_id")
 	model := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	trace.data.Model = model[:min(len(model), 256)]

@@ -14,12 +14,14 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -107,6 +109,8 @@ func TestRequestMonitorCanceledDownstreamAndRetries(t *testing.T) {
 			require.NoError(t, response.Body.Close())
 			if channel == 1 {
 				status := relaycommon.NewStreamStatus()
+				status.MarkFailed("upstream_timeout", "server_error", 503)
+				status.RecordDiagnostic(relaycommon.StreamDiagnostic{Event: "error", ErrorMessage: "previous attempt failed"})
 				status.SetEndReason(relaycommon.StreamEndReasonTimeout, context.DeadlineExceeded)
 				service.RecordMonitorStream(c, status)
 			}
@@ -123,6 +127,7 @@ func TestRequestMonitorCanceledDownstreamAndRetries(t *testing.T) {
 	serialized, err := common.Marshal(row)
 	require.NoError(t, err)
 	assert.NotContains(t, string(serialized), "context deadline exceeded")
+	assert.NotContains(t, string(serialized), "stream_details")
 	engine.GET("/cancel", func(c *gin.Context) { c.Status(http.StatusOK) })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -133,6 +138,95 @@ func TestRequestMonitorCanceledDownstreamAndRetries(t *testing.T) {
 	serialized, err = common.Marshal(row)
 	require.NoError(t, err)
 	assert.Contains(t, string(serialized), `"client_error_detail":"context canceled"`)
+}
+
+func TestRequestMonitorResponseDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name, event string
+		want        map[string]any
+	}{
+		{name: "未完成原因", event: `{"type":"response.incomplete","response":{"id":"resp-limit","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`, want: map[string]any{"event": "response.incomplete", "response_id": "resp-limit", "incomplete_reason": "max_output_tokens"}},
+		{name: "缺失未完成原因", event: `{"type":"response.incomplete","response":{"status":"incomplete"}}`, want: map[string]any{"event": "response.incomplete"}},
+		{name: "响应失败详情", event: `{"type":"response.failed","response":{"id":"resp-failed","status":"failed","error":{"code":"server_error","type":"server_error","message":"The upstream could not finish.\nPlease retry.","param":"model"}}}`, want: map[string]any{"event": "response.failed", "response_id": "resp-failed", "error_code": "server_error", "error_type": "server_error", "error_message": "The upstream could not finish.\nPlease retry.", "error_param": "model"}},
+		{name: "SSE 平铺错误", event: `{"type":"error","code":"context_length_exceeded","message":"Input too long","param":"input"}`, want: map[string]any{"event": "error", "error_code": "context_length_exceeded", "error_message": "Input too long", "error_param": "input"}},
+		{name: "WebSocket 嵌套错误", event: `{"type":"error","status":429,"error":{"code":"rate_limit_exceeded","type":"rate_limit_error","message":"Too many requests","param":"model"}}`, want: map[string]any{"event": "error", "error_code": "rate_limit_exceeded", "error_type": "rate_limit_error", "error_status": float64(429), "error_message": "Too many requests", "error_param": "model"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(middleware.RequestId(), middleware.RouteTag("relay"))
+			engine.POST("/v1/responses", func(c *gin.Context) {
+				status := relaycommon.NewStreamStatus()
+				info := &relaycommon.RelayInfo{StreamStatus: status}
+				var event dto.ResponsesStreamResponse
+				require.NoError(t, common.UnmarshalJsonStr(tc.event, &event))
+				service.NewResponsesUsageAccumulator(info).Observe(&event, []byte(tc.event))
+				status.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				service.MarkRequestPolicySuccess(c, status)
+			})
+			engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+			row := service.RequestMonitorSnapshots()[0]
+			assert.Equal(t, "failed", row.State)
+			assert.Equal(t, "done", row.StreamEnd)
+			serialized, err := common.Marshal(row)
+			require.NoError(t, err)
+			var diagnostic map[string]any
+			require.NoError(t, common.Unmarshal(serialized, &diagnostic))
+			assert.Equal(t, tc.want, diagnostic["stream_details"])
+			require.NotNil(t, row.StreamDetails)
+			row.StreamDetails.ErrorMessage = "changed snapshot"
+			assert.NotEqual(t, "changed snapshot", service.RequestMonitorSnapshots()[0].StreamDetails.ErrorMessage)
+		})
+	}
+}
+
+func TestRequestMonitorResponseDiagnosticRedactionAndLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name, message string
+		truncated     bool
+	}{
+		{name: "凭据脱敏", message: `Invalid key plain-channel-credential; Bearer secret-bearer; sk-secret-key; {"api_key":"secret-api-key"}; https://secret-user:secret-password@example.test/error?token=secret-query`},
+		{name: "中文消息限长", message: strings.Repeat("错误详情", 1200), truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(middleware.RequestId(), middleware.RouteTag("relay"))
+			engine.POST("/v1/responses", func(c *gin.Context) {
+				payload, err := common.Marshal(map[string]any{
+					"type": "response.failed",
+					"response": map[string]any{
+						"status": "failed",
+						"error":  map[string]any{"code": "server_error", "message": tc.message},
+						"output": []any{map[string]any{"type": "message", "content": []any{map[string]any{"type": "output_text", "text": "private-output-body"}}}},
+					},
+				})
+				require.NoError(t, err)
+				var event dto.ResponsesStreamResponse
+				require.NoError(t, common.Unmarshal(payload, &event))
+				info := &relaycommon.RelayInfo{
+					StreamStatus: relaycommon.NewStreamStatus(),
+					ChannelMeta:  &relaycommon.ChannelMeta{ApiKey: "plain-channel-credential"},
+				}
+				service.NewResponsesUsageAccumulator(info).Observe(&event, payload)
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				service.MarkRequestPolicySuccess(c, info.StreamStatus)
+			})
+			engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+			row := service.RequestMonitorSnapshots()[0]
+			require.NotNil(t, row.StreamDetails)
+			assert.Equal(t, tc.truncated, row.StreamDetails.Truncated)
+			assert.True(t, utf8.ValidString(row.StreamDetails.ErrorMessage))
+			assert.LessOrEqual(t, len(row.StreamDetails.ErrorMessage), 4096+len("…"))
+			serialized, err := common.Marshal(row)
+			require.NoError(t, err)
+			for _, secret := range []string{"plain-channel-credential", "secret-", "private-output-body"} {
+				assert.NotContains(t, string(serialized), secret)
+			}
+			if !tc.truncated {
+				assert.Contains(t, row.StreamDetails.ErrorMessage, "Invalid key")
+				assert.Contains(t, row.StreamDetails.ErrorMessage, "[redacted]")
+			}
+		})
+	}
 }
 
 func TestRequestMonitorWebSocketErrorDetails(t *testing.T) {

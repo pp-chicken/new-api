@@ -75,6 +75,17 @@ export interface MonitoredRequest {
   stream_end: string
   stream_outcome: string
   stream_error?: string
+  stream_details?: {
+    event?: string
+    response_id?: string
+    incomplete_reason?: string
+    error_code?: string
+    error_type?: string
+    error_status?: number
+    error_message?: string
+    error_param?: string
+    truncated?: boolean
+  }
   upstreams: MonitoredUpstream[] | null
   events: PolicyEvent[] | null
   truncated: boolean

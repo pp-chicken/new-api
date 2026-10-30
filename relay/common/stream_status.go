@@ -55,6 +55,54 @@ type StreamStatus struct {
 	errorStatus      int
 	incompleteReason string
 	expectsTerminal  bool
+	diagnostic       StreamDiagnostic
+}
+
+// StreamDiagnostic 只供请求监控使用，错误消息不进入渠道健康分类。
+type StreamDiagnostic struct {
+	Event            string `json:"event,omitempty"`
+	ResponseID       string `json:"response_id,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorType        string `json:"error_type,omitempty"`
+	ErrorStatus      int    `json:"error_status,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
+	ErrorParam       string `json:"error_param,omitempty"`
+	IncompleteReason string `json:"incomplete_reason,omitempty"`
+	Truncated        bool   `json:"truncated,omitempty"`
+}
+
+// RecordDiagnostic 接收已脱敏并限长的协议诊断，空字段不覆盖已有详情。
+func (s *StreamStatus) RecordDiagnostic(detail StreamDiagnostic) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if detail.Event != "" {
+		s.diagnostic.Event = detail.Event
+	}
+	if detail.ResponseID != "" {
+		s.diagnostic.ResponseID = detail.ResponseID
+	}
+	if detail.ErrorMessage != "" {
+		s.diagnostic.ErrorMessage = detail.ErrorMessage
+	}
+	if detail.ErrorParam != "" {
+		s.diagnostic.ErrorParam = detail.ErrorParam
+	}
+	s.diagnostic.Truncated = s.diagnostic.Truncated || detail.Truncated
+}
+
+func (s *StreamStatus) DiagnosticSnapshot() StreamDiagnostic {
+	if s == nil {
+		return StreamDiagnostic{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	detail := s.diagnostic
+	detail.ErrorCode, detail.ErrorType, detail.ErrorStatus = s.errorCode, s.errorType, s.errorStatus
+	detail.IncompleteReason = s.incompleteReason
+	return detail
 }
 
 // StreamOutcome holds classification facts only; upstream messages never

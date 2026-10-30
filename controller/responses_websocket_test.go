@@ -893,12 +893,14 @@ func TestResponsesWebSocketCancelErrorDoesNotFinishActiveRequest(t *testing.T) {
 
 func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing.T) {
 	for _, tc := range []struct {
-		name, upstream, wantType, wantMessage string
-		status                                int
+		name, upstream, wantType, wantMessage, wantCode, responseID string
+		status                                                      int
 	}{
-		{name: "structured error", upstream: `{"type":"error","response_id":"rejected","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Invalid input"},
+		{name: "structured error", upstream: `{"type":"error","response_id":"rejected","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Invalid input", wantCode: "invalid_input", responseID: "rejected"},
 		// A frame without an error object is still reported as a request error.
 		{name: "bare error", upstream: `{"type":"error","status":500,"message":"upstream rejected"}`, status: http.StatusInternalServerError, wantType: "invalid_request_error", wantMessage: "upstream rejected"},
+		{name: "未提供错误码及状态码", upstream: `{"type":"error","error":{"type":"invalid_request_error","message":"Unsupported model"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Unsupported model", wantCode: "unknown_error"},
+		{name: "凭据脱敏", upstream: `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Invalid credential: Bearer secret-token"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Invalid credential: Bearer secret-token", wantCode: "unknown_error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			preConsumed := make(chan int, 1)
@@ -953,6 +955,33 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 			}
 			fixture.closeAndWait(t)
 			assertResponsesWSAccounting(t, fixture, nil)
+			var call *service.MonitoredRequest
+			for _, row := range service.RequestMonitorSnapshots() {
+				if row.Kind == "ws_request" && row.UserID == fixture.user.Id {
+					call = &row
+					break
+				}
+			}
+			require.NotNil(t, call)
+			assert.Equal(t, "failed", call.State)
+			assert.Equal(t, tc.status, call.Status)
+			assert.Equal(t, "done", call.StreamEnd)
+			assert.Equal(t, "failed", call.StreamOutcome)
+			require.NotNil(t, call.StreamDetails)
+			assert.Equal(t, "error", call.StreamDetails.Event)
+			assert.Equal(t, tc.responseID, call.StreamDetails.ResponseID)
+			assert.Equal(t, tc.wantCode, call.StreamDetails.ErrorCode)
+			assert.Equal(t, tc.wantType, call.StreamDetails.ErrorType)
+			if tc.name == "未提供错误码及状态码" {
+				assert.Zero(t, call.StreamDetails.ErrorStatus, "不能把网关兜底的 400 记为上游状态码")
+			} else {
+				assert.Equal(t, tc.status, call.StreamDetails.ErrorStatus)
+			}
+			if tc.name == "凭据脱敏" {
+				assert.Equal(t, "Invalid credential: [redacted]", call.StreamDetails.ErrorMessage)
+			} else {
+				assert.Equal(t, tc.wantMessage, call.StreamDetails.ErrorMessage)
+			}
 		})
 	}
 }
