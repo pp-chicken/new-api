@@ -87,6 +87,30 @@ export function RequestMonitor() {
     },
     { id: 'model', header: t('Model'), cell: (row) => row.model || '—' },
     {
+      id: 'user',
+      header: t('Username'),
+      cell: (row) => (
+        <div className='max-w-48 break-all'>
+          <div>{row.username || '—'}</div>
+          {!!row.user_id && (
+            <div className='text-muted-foreground text-xs'>#{row.user_id}</div>
+          )}
+        </div>
+      ),
+    },
+    {
+      id: 'token',
+      header: t('Token name'),
+      cell: (row) => (
+        <div className='max-w-48 break-all'>
+          <div>{row.token_name || '—'}</div>
+          {!!row.token_id && (
+            <div className='text-muted-foreground text-xs'>#{row.token_id}</div>
+          )}
+        </div>
+      ),
+    },
+    {
       id: 'state',
       header: t('Status'),
       cell: (row) => (
@@ -130,7 +154,7 @@ export function RequestMonitor() {
           </p>
           <p className='text-muted-foreground text-sm'>
             {t(
-              'Only diagnostic metadata is recorded. Bodies, credentials and query parameters are excluded. Upstream HTTP details cover the shared relay transport; other transports may have no upstream records.'
+              'Request and response bodies are kept in memory for 30 minutes from request start. Each body is limited to 1 MiB; the 64 MiB body cache evicts older captures when full. Authorization headers and query parameters are excluded.'
             )}
           </p>
           <form
@@ -141,8 +165,8 @@ export function RequestMonitor() {
             }}
           >
             <Input
-              aria-label={t('Search request ID, model or path')}
-              placeholder={t('Search request ID, model or path')}
+              aria-label={t('Search request ID, user, token, model or path')}
+              placeholder={t('Search request ID, user, token, model or path')}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               className='w-full sm:max-w-sm'

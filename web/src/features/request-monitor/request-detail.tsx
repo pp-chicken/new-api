@@ -16,7 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
@@ -36,8 +37,13 @@ import {
   getServerErrorStatus,
 } from '@/lib/server-error-message'
 
-import { getRequest, type MonitoredUpstream } from './api'
+import {
+  getRequest,
+  type MonitoredRequest,
+  type MonitoredUpstream,
+} from './api'
 import { requestStateLabel } from './labels'
+import { RequestBodies } from './request-bodies'
 import { WebSocketDetails } from './websocket-details'
 
 export function RequestDetail(props: {
@@ -48,6 +54,7 @@ export function RequestDetail(props: {
 }) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const queryClient = useQueryClient()
   const detail = useQuery({
     queryKey: ['request-monitor-detail', props.id],
     queryFn: () => getRequest(props.id ?? ''),
@@ -59,6 +66,31 @@ export function RequestDetail(props: {
     gcTime: 0,
   })
   const data = detail.data
+  const expiresAt = data?.expires_at
+  useEffect(() => {
+    if (!props.id || !expiresAt) return
+    const expires = new Date(expiresAt).getTime()
+    if (!Number.isFinite(expires)) return
+    const clearExpiredBodies = () => {
+      if (Date.now() < expires) return
+      queryClient.setQueryData<MonitoredRequest>(
+        ['request-monitor-detail', props.id],
+        (previous) =>
+          previous
+            ? { ...previous, bodies: undefined, bodies_unavailable: 'expired' }
+            : previous
+      )
+    }
+    const timer = window.setTimeout(
+      clearExpiredBodies,
+      Math.max(0, expires - Date.now())
+    )
+    window.addEventListener('focus', clearExpiredBodies)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('focus', clearExpiredBodies)
+    }
+  }, [expiresAt, props.id, queryClient])
   const streamDetails = data?.stream_details
   const diagnosticFields = [
     { label: t('Incomplete reason'), value: streamDetails?.incomplete_reason },
@@ -240,6 +272,18 @@ export function RequestDetail(props: {
               <dd>{data.user_id || '—'}</dd>
             </div>
             <div>
+              <dt className='text-muted-foreground'>{t('Username')}</dt>
+              <dd className='break-all'>{data.username || '—'}</dd>
+            </div>
+            <div>
+              <dt className='text-muted-foreground'>{t('Token ID')}</dt>
+              <dd>{data.token_id || '—'}</dd>
+            </div>
+            <div>
+              <dt className='text-muted-foreground'>{t('Token name')}</dt>
+              <dd className='break-all'>{data.token_name || '—'}</dd>
+            </div>
+            <div>
               <dt className='text-muted-foreground'>
                 {t('Downstream HTTP status')}
               </dt>
@@ -308,6 +352,7 @@ export function RequestDetail(props: {
               {t('Some diagnostic events were truncated to limit memory use.')}
             </p>
           )}
+          <RequestBodies data={data} />
           <section className='space-y-2'>
             <h3 className='font-medium'>{t('Upstream requests')}</h3>
             <p className='text-muted-foreground text-xs'>

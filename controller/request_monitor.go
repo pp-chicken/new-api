@@ -18,7 +18,7 @@ func GetRequestMonitor(c *gin.Context) {
 		if state != "" && row.State != state {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(row.ID+" "+row.ParentID+" "+row.Model+" "+row.Path), query) {
+		if query != "" && !strings.Contains(strings.ToLower(row.ID+" "+row.ParentID+" "+row.Model+" "+row.Path+" "+row.Username+" "+row.TokenName), query) {
 			continue
 		}
 		// 列表只返回概览，详情按请求 ID 获取，避免轮询重复传输完整链路。
@@ -28,16 +28,15 @@ func GetRequestMonitor(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
 		"items": items, "capacity": service.RequestMonitorCapacity, "instance": service.RequestMonitorInstance,
+		"retention_seconds": int(service.RequestMonitorRetention.Seconds()), "body_limit_bytes": service.RequestMonitorBodyLimit,
 	}})
 }
 
 func GetRequestMonitorDetail(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	for _, row := range service.RequestMonitorSnapshots() {
-		if row.ID == c.Param("id") {
-			c.JSON(http.StatusOK, gin.H{"success": true, "data": row})
-			return
-		}
+	if row, ok := service.RequestMonitorDetail(c.Param("id")); ok {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": row})
+		return
 	}
 	message := common.NewMessage("Request record expired or belongs to another instance")
 	body := message.Fields()

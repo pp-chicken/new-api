@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { act } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -77,6 +78,225 @@ function renderMonitor() {
 afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
   vi.restoreAllMocks()
+  vi.useRealTimers()
+})
+
+it('列表和详情展示请求的用户及令牌名称，并将名称用于搜索和诊断复制', async () => {
+  const recorded = {
+    ...request,
+    username: 'monitor-alice',
+    token_id: 21,
+    token_name: 'codex-cli',
+  }
+  const get = vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [recorded], capacity: 500, instance: 'node-1' }
+          : recorded,
+    },
+  }))
+  const user = userEvent.setup()
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+  renderMonitor()
+  const row = await screen.findByRole('row', { name: /monitor-alice/ })
+  expect(within(row).getByText('monitor-alice')).toBeVisible()
+  expect(within(row).getByText('#1')).toBeVisible()
+  expect(within(row).getByText('codex-cli')).toBeVisible()
+  expect(within(row).getByText('#21')).toBeVisible()
+  await user.type(
+    screen.getByRole('textbox', {
+      name: 'Search request ID, user, token, model or path',
+    }),
+    'codex-cli'
+  )
+  await user.click(screen.getByRole('button', { name: 'Search' }))
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith('/api/performance/requests', {
+      params: { q: 'codex-cli', state: '' },
+    })
+  )
+  await user.click(screen.getByRole('button', { name: request.id }))
+  const dialog = await screen.findByRole('dialog')
+  expect(await within(dialog).findByText('monitor-alice')).toBeVisible()
+  expect(within(dialog).getByText('codex-cli')).toBeVisible()
+  expect(within(dialog).getByText('Token ID')).toBeVisible()
+  expect(within(dialog).getByText('21')).toBeVisible()
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Copy diagnostic JSON' })
+  )
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify(recorded, null, 2))
+  )
+})
+
+it('请求详情展示原始正文、切换上游正文并复制，列表说明短期保留规则', async () => {
+  const recorded = {
+    ...request,
+    bodies: [
+      {
+        direction: 'request',
+        content: '{"input":"你好"}',
+        encoding: 'utf-8',
+        content_type: 'application/json',
+        total_bytes: 18,
+        truncated: false,
+      },
+      {
+        direction: 'upstream_response',
+        attempt: 1,
+        channel_id: 5,
+        content: 'data: {"type":"error"}\n\n',
+        encoding: 'utf-8',
+        content_type: 'text/event-stream',
+        total_bytes: 25,
+        truncated: true,
+      },
+    ],
+  }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [request], capacity: 500, instance: 'node-1' }
+          : recorded,
+    },
+  }))
+  const user = userEvent.setup()
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: request.id }))
+  const dialog = await screen.findByRole('dialog')
+  expect(
+    await within(dialog).findByRole('textbox', { name: 'Request body' })
+  ).toHaveValue(recorded.bodies[0].content)
+  expect(
+    within(dialog).getByRole('textbox', { name: 'Request body' })
+  ).toHaveAttribute('readonly')
+  await user.click(within(dialog).getByRole('button', { name: 'Copy body' }))
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(recorded.bodies[0].content)
+  )
+  await user.click(
+    within(dialog).getByRole('tab', { name: /Upstream response body/ })
+  )
+  expect(
+    within(dialog).getByRole('textbox', { name: /Upstream response body/ })
+  ).toHaveValue(recorded.bodies[1].content)
+  expect(
+    within(dialog).getByText('Body truncated at the capture limit.')
+  ).toBeVisible()
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Copy diagnostic JSON' })
+  )
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify(recorded, null, 2))
+  )
+})
+
+it('正文被缓存容量限制淘汰时显示原因', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [request], capacity: 500, instance: 'node-1' }
+          : { ...request, bodies_unavailable: 'evicted' },
+    },
+  }))
+  const user = userEvent.setup()
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: request.id }))
+  expect(
+    await screen.findByText(
+      'Bodies were evicted to keep the capture cache within its memory limit.'
+    )
+  ).toBeVisible()
+})
+
+it('收到详情时已过期的正文不会再次进入详情缓存', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [request], capacity: 500, instance: 'node-1' }
+          : {
+              ...request,
+              expires_at: '2020-01-01T00:00:00Z',
+              bodies: [
+                {
+                  direction: 'request',
+                  content: 'expired-body',
+                  encoding: 'utf-8',
+                  total_bytes: 12,
+                  truncated: false,
+                },
+              ],
+            },
+    },
+  }))
+  const user = userEvent.setup()
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: request.id }))
+  expect(
+    await screen.findByText('Body captures expired after 30 minutes.')
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('textbox', { name: 'Request body' })
+  ).not.toBeInTheDocument()
+  expect(
+    clients[0].getQueryData<MonitoredRequest>([
+      'request-monitor-detail',
+      request.id,
+    ])?.bodies
+  ).toBeUndefined()
+})
+
+it('详情达到过期时间后清除正文，停止提供正文复制', async () => {
+  const expires = Date.now() + 60_000
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/performance/requests'
+          ? { items: [request], capacity: 500, instance: 'node-1' }
+          : {
+              ...request,
+              expires_at: new Date(expires).toISOString(),
+              bodies: [
+                {
+                  direction: 'request',
+                  content: 'short-lived-body',
+                  encoding: 'utf-8',
+                  total_bytes: 16,
+                  truncated: false,
+                },
+              ],
+            },
+    },
+  }))
+  const user = userEvent.setup()
+  renderMonitor()
+  await user.click(await screen.findByRole('button', { name: request.id }))
+  expect(
+    await screen.findByRole('textbox', { name: 'Request body' })
+  ).toHaveValue('short-lived-body')
+  vi.useFakeTimers()
+  await act(async () => {
+    vi.setSystemTime(expires + 1)
+    // 触发组件重新计算到期时间。
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(0)
+  })
+  expect(
+    screen.queryByRole('textbox', { name: 'Request body' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Copy body' })
+  ).not.toBeInTheDocument()
 })
 
 it('筛选请求并打开 HTTP 200 但流中断的详情', async () => {
@@ -92,7 +312,9 @@ it('筛选请求并打开 HTTP 200 但流中断的详情', async () => {
   const user = userEvent.setup()
   renderMonitor()
   await user.type(
-    screen.getByRole('textbox', { name: 'Search request ID, model or path' }),
+    screen.getByRole('textbox', {
+      name: 'Search request ID, user, token, model or path',
+    }),
     'test-model'
   )
   await user.click(screen.getByRole('button', { name: 'Search' }))
@@ -110,6 +332,12 @@ it('筛选请求并打开 HTTP 200 但流中断的详情', async () => {
   expect(await within(dialog).findByText('unexpected_eof')).toBeVisible()
   expect(within(dialog).getByText('Failed')).toBeVisible()
   expect(within(dialog).getByText('scanner_error / —')).toBeVisible()
+  expect(
+    within(dialog).getByText('Username').nextElementSibling
+  ).toHaveTextContent('—')
+  expect(
+    within(dialog).getByText('Token name').nextElementSibling
+  ).toHaveTextContent('—')
   expect(
     within(dialog).getByText('Stream error details').nextElementSibling
   ).toHaveTextContent('—')

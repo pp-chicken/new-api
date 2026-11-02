@@ -217,6 +217,9 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 			} else {
 				err := s.client.WriteMessage(outgoing.kind, outgoing.body)
 				service.MonitorWSMessage(s.ctx, "client", false, len(outgoing.body), err)
+				if err == nil {
+					service.RecordMonitorWSBodyByID(requestID, "response", outgoing.body)
+				}
 				if err != nil {
 					state.closeCode = websocket.CloseInternalServerErr
 				}
@@ -232,6 +235,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 	}()
 	request := s.request.Clone(s.ctx)
 	request.Body = io.NopCloser(bytes.NewReader(message))
+	request.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(message)), nil }
 	request.ContentLength = int64(len(message))
 	request.Header.Set("Content-Type", "application/json")
 	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
@@ -308,6 +312,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			state.closeCode = websocket.CloseInternalServerErr
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 		}
+		service.RecordMonitorWSBody(c.Request.Context(), "upstream_request", 1, info.ChannelId, payload)
 	} else {
 		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
 		for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
@@ -360,6 +365,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				state.closeCode = websocket.CloseInternalServerErr
 				return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
+			service.RecordMonitorWSBody(c.Request.Context(), "upstream_request", policy.Attempts, channel.Id, payload)
 			s.lockedModel, s.lockedChannelID, s.lockedGroup = modelName, channel.Id, info.UsingGroup
 			s.lockedKey, s.lockedKeyIndex = info.ApiKey, info.ChannelMultiKeyIndex
 			s.lockedRoute, _ = channel.GetOtherSettings().AdvancedCustom.MatchPathForModel(c.Request.URL.Path, modelName)
@@ -418,6 +424,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			if err := common.Unmarshal(incoming.body, &event); err != nil {
 				info.StreamStatus.RecordError("invalid upstream websocket event")
+				service.RecordMonitorWSBody(c.Request.Context(), "upstream_response", max(1, policy.Attempts), info.ChannelId, incoming.body)
 			} else {
 				if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
 					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
@@ -437,9 +444,14 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 						continue
 					}
 					terminal, ambiguous, controlError := responsesWSErrorEndsRequest(rejection, create.StreamID, responseID, sentControl)
+					if terminal || controlError {
+						service.RecordMonitorWSBody(c.Request.Context(), "upstream_response", max(1, policy.Attempts), info.ChannelId, incoming.body)
+					}
 					if !terminal {
 						if err := s.writeClient(incoming.kind, incoming.body); err != nil {
 							s.shutdown(websocket.CloseInternalServerErr, "")
+						} else if controlError {
+							service.RecordMonitorWSBody(c.Request.Context(), "response", 0, 0, incoming.body)
 						}
 						// Only a control error in this stream resolves its pending control.
 						if controlError {
@@ -480,6 +492,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 					return rejected
 				}
+				// 归属已确认，迟到的上一轮帧及其他 stream 的帧不写入当前请求。
+				service.RecordMonitorWSBody(c.Request.Context(), "upstream_response", max(1, policy.Attempts), info.ChannelId, incoming.body)
 				if strings.HasPrefix(event.Type, "response.") {
 					if !accepted {
 						// Like HTTP, bind the session only once upstream accepted the request.
@@ -504,15 +518,20 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
 				s.shutdown(websocket.CloseInternalServerErr, "")
+			} else {
+				service.RecordMonitorWSBody(c.Request.Context(), "response", 0, 0, incoming.body)
 			}
 			if accepted && pendingControl != nil {
 				if err := s.writeTarget(websocket.TextMessage, pendingControl); err != nil {
 					s.shutdown(websocket.CloseInternalServerErr, "")
+				} else {
+					service.RecordMonitorWSBody(c.Request.Context(), "upstream_request", max(1, policy.Attempts), info.ChannelId, pendingControl)
 				}
 				sentControl = pendingControl
 				pendingControl = nil
 			}
 		case control := <-state.controls:
+			service.RecordMonitorWSBody(c.Request.Context(), "request", 0, 0, control.body)
 			// A late interrupt must not reserve a control slot for the next response.
 			if control.eventType == "response.interrupt" && s.lastResponseID != "" {
 				var interrupt struct {
@@ -532,6 +551,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			if err := s.writeTarget(websocket.TextMessage, control.body); err != nil {
 				s.shutdown(websocket.CloseInternalServerErr, "")
+			} else {
+				service.RecordMonitorWSBody(c.Request.Context(), "upstream_request", max(1, policy.Attempts), info.ChannelId, control.body)
 			}
 			sentControl = control.body
 		case <-idle.C:

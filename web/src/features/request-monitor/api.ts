@@ -48,6 +48,17 @@ export interface MonitorSocket {
   error_detail?: string
 }
 
+export interface MonitoredBody {
+  direction: 'request' | 'response' | 'upstream_request' | 'upstream_response'
+  attempt?: number
+  channel_id?: number
+  content_type?: string
+  encoding: 'utf-8' | 'base64'
+  content: string
+  total_bytes: number
+  truncated: boolean
+}
+
 export interface MonitoredRequest {
   kind?: 'http' | 'websocket' | 'ws_request'
   parent_id?: string
@@ -61,11 +72,17 @@ export interface MonitoredRequest {
   id: string
   started_at: string
   ended_at?: string
+  expires_at?: string
+  bodies?: MonitoredBody[]
+  bodies_unavailable?: 'expired' | 'evicted'
   duration_ms: number
   method: string
   path: string
   model: string
   user_id: number
+  username?: string
+  token_id?: number
+  token_name?: string
   channel_id: number
   status: number
   bytes: number
@@ -95,6 +112,8 @@ export interface MonitorList {
   items: MonitoredRequest[]
   capacity: number
   instance: string
+  retention_seconds?: number
+  body_limit_bytes?: number
 }
 
 export async function getRequests(
@@ -112,5 +131,10 @@ export async function getRequest(id: string): Promise<MonitoredRequest> {
   const response = await api.get<{ success: boolean; data: MonitoredRequest }>(
     `/api/performance/requests/${encodeURIComponent(id)}`
   )
-  return requireServerSuccess(response.data).data
+  const data = requireServerSuccess(response.data).data
+  // 详情响应可能在网络传输期间过期，避免轮询将正文重新放入缓存。
+  if (data.expires_at && Date.parse(data.expires_at) <= Date.now()) {
+    return { ...data, bodies: undefined, bodies_unavailable: 'expired' }
+  }
+  return data
 }

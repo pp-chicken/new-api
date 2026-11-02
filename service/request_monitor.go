@@ -52,11 +52,15 @@ type MonitoredRequest struct {
 	ID                string                        `json:"id"`
 	EndedAt           *time.Time                    `json:"ended_at,omitempty"`
 	StartedAt         time.Time                     `json:"started_at"`
+	ExpiresAt         time.Time                     `json:"expires_at"`
 	DurationMS        int64                         `json:"duration_ms"`
 	Method            string                        `json:"method"`
 	Path              string                        `json:"path"`
 	Model             string                        `json:"model"`
 	UserID            int                           `json:"user_id"`
+	Username          string                        `json:"username,omitempty"`
+	TokenID           int                           `json:"token_id,omitempty"`
+	TokenName         string                        `json:"token_name,omitempty"`
 	ChannelID         int                           `json:"channel_id"`
 	Status            int                           `json:"status"`
 	Bytes             int                           `json:"bytes"`
@@ -70,12 +74,15 @@ type MonitoredRequest struct {
 	Upstreams         []MonitoredUpstream           `json:"upstreams"`
 	Events            []PolicyEvent                 `json:"events"`
 	Truncated         bool                          `json:"truncated"`
+	Bodies            []MonitoredBody               `json:"bodies,omitempty"`
+	BodiesUnavailable string                        `json:"bodies_unavailable,omitempty"`
 }
 
 type requestMonitorTrace struct {
 	mu           sync.Mutex
 	data         MonitoredRequest
 	streamFailed bool
+	bodies       *monitorBodyRecord
 }
 
 type requestMonitorStore struct {
@@ -87,24 +94,71 @@ type requestMonitorStore struct {
 var requestMonitor requestMonitorStore
 var RequestMonitorInstance = common.NewRequestId()
 
-// StartRequestMonitor 只保存诊断元数据，不读取正文、查询参数或认证头。
+// captureIdentity 只取已解析的身份元数据，不复制 Token 密钥或认证头。
+func (d *MonitoredRequest) captureIdentity(c *gin.Context) {
+	d.UserID = c.GetInt("id")
+	d.Username = c.GetString("username")
+	d.TokenID = c.GetInt("token_id")
+	d.TokenName = c.GetString("token_name")
+	for _, value := range []*string{&d.Username, &d.TokenName} {
+		if len(*value) > 256 {
+			end := 256
+			for !utf8.RuneStart((*value)[end]) {
+				end--
+			}
+			*value = (*value)[:end]
+			d.Truncated = true
+		}
+	}
+}
+
+var startMonitorCleanup = sync.OnceFunc(func() {
+	go func() {
+		for now := range time.Tick(time.Minute) {
+			requestMonitor.expire(now)
+		}
+	}()
+})
+
+func (s *requestMonitorStore) expire(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index, trace := range s.rows {
+		if trace != nil && !now.Before(trace.data.ExpiresAt) {
+			trace.bodies.release("expired")
+			s.rows[index] = nil
+		}
+	}
+}
+
+// StartRequestMonitor 旁路采集正文，认证头和查询参数不进入诊断记录。
 func StartRequestMonitor(c *gin.Context) {
 	if trace, _ := c.Request.Context().Value(monitorContextKey{}).(*requestMonitorTrace); trace != nil {
 		return
 	}
+	now := time.Now()
 	trace := &requestMonitorTrace{data: MonitoredRequest{
-		ID: c.GetString(common.RequestIdKey), StartedAt: time.Now(),
+		ID: c.GetString(common.RequestIdKey), StartedAt: now, ExpiresAt: now.Add(RequestMonitorRetention),
 		Kind: "http", Method: c.Request.Method, Path: c.FullPath(), State: "running",
 		Upstreams: []MonitoredUpstream{}, Events: []PolicyEvent{},
 	}}
 	if trace.data.ID == "" {
 		trace.data.ID = common.NewRequestId()
 	}
+	trace.data.captureIdentity(c)
+	trace.bodies = requestMonitorBodies.start(trace.data.ExpiresAt)
+	if c.Request.Body != nil {
+		c.Request.Body = &monitorRequestBody{ReadCloser: c.Request.Body, record: trace.bodies, direction: "request", contentType: c.GetHeader("Content-Type")}
+	}
 	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), monitorContextKey{}, trace))
 	requestMonitor.mu.Lock()
+	if previous := requestMonitor.rows[requestMonitor.next]; previous != nil {
+		previous.bodies.release("evicted")
+	}
 	requestMonitor.rows[requestMonitor.next] = trace
 	requestMonitor.next = (requestMonitor.next + 1) % RequestMonitorCapacity
 	requestMonitor.mu.Unlock()
+	startMonitorCleanup()
 }
 
 func FinishRequestMonitor(c *gin.Context, writeErr error, panicked bool) {
@@ -116,6 +170,7 @@ func FinishRequestMonitor(c *gin.Context, writeErr error, panicked bool) {
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
 	d := &trace.data
+	d.captureIdentity(c)
 	ended := time.Now()
 	d.EndedAt = &ended
 	d.DurationMS = time.Since(d.StartedAt).Milliseconds()
@@ -129,7 +184,7 @@ func FinishRequestMonitor(c *gin.Context, writeErr error, panicked bool) {
 	}
 	d.Model = common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	d.Model = d.Model[:min(len(d.Model), 256)]
-	d.UserID, d.ChannelID = c.GetInt("id"), c.GetInt("channel_id")
+	d.ChannelID = c.GetInt("channel_id")
 	d.Status, d.Bytes = c.Writer.Status(), max(0, c.Writer.Size())
 	d.State = "completed"
 	d.ClientError = monitorError(writeErr)
@@ -208,6 +263,7 @@ func (trace *requestMonitorTrace) snapshot() MonitoredRequest {
 
 // RequestMonitorSnapshots 按请求进入时间倒序返回当前实例的有界快照。
 func RequestMonitorSnapshots() []MonitoredRequest {
+	requestMonitor.expire(time.Now())
 	requestMonitor.mu.Lock()
 	rows := make([]*requestMonitorTrace, 0, RequestMonitorCapacity)
 	for i := range RequestMonitorCapacity {
@@ -222,6 +278,29 @@ func RequestMonitorSnapshots() []MonitoredRequest {
 		result = append(result, trace.snapshot())
 	}
 	return result
+}
+
+// RequestMonitorDetail 仅详情接口读取正文，列表轮询不复制或传输正文。
+func RequestMonitorDetail(id string) (MonitoredRequest, bool) {
+	requestMonitor.expire(time.Now())
+	requestMonitor.mu.Lock()
+	var trace *requestMonitorTrace
+	for _, candidate := range requestMonitor.rows {
+		if candidate != nil && candidate.data.ID == id {
+			trace = candidate
+			break
+		}
+	}
+	requestMonitor.mu.Unlock()
+	if trace == nil {
+		return MonitoredRequest{}, false
+	}
+	row := trace.snapshot()
+	row.Bodies, row.BodiesUnavailable = trace.bodies.snapshot(time.Now())
+	if row.BodiesUnavailable == "expired" {
+		return MonitoredRequest{}, false
+	}
+	return row, true
 }
 
 // monitorError 使用固定分类，避免底层错误字符串泄露 URL 查询参数、代理凭据和正文。
@@ -341,7 +420,8 @@ func MonitorRelayTransport(c *gin.Context, base http.RoundTripper) http.RoundTri
 	trace.streamFailed = false
 	trace.data.StreamEnd, trace.data.StreamOutcome, trace.data.StreamError = "", "", ""
 	trace.data.StreamDetails = nil
-	trace.data.UserID, trace.data.ChannelID = c.GetInt("id"), c.GetInt("channel_id")
+	trace.data.captureIdentity(c)
+	trace.data.ChannelID = c.GetInt("channel_id")
 	model := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	trace.data.Model = model[:min(len(model), 256)]
 	trace.mu.Unlock()
@@ -361,6 +441,11 @@ func (t *monitoredTransport) RoundTrip(req *http.Request) (*http.Response, error
 		ChannelID: t.channelID, Host: req.URL.Host, Method: req.Method, StartedAt: started,
 	})
 	t.trace.mu.Unlock()
+	// 独立克隆请求，只在底层 transport 读取时复制正文，GetBody 重放能力保持不变。
+	req = req.Clone(req.Context())
+	if req.Body != nil {
+		req.Body = &monitorRequestBody{ReadCloser: req.Body, record: t.trace.bodies, direction: "upstream_request", attempt: index + 1, channelID: t.channelID, contentType: req.Header.Get("Content-Type")}
+	}
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			t.trace.mu.Lock()
@@ -391,7 +476,7 @@ func (t *monitoredTransport) RoundTrip(req *http.Request) (*http.Response, error
 			}
 		}
 		if resp.Body != nil {
-			resp.Body = &monitoredBody{ReadCloser: resp.Body, trace: t.trace, index: index, started: started}
+			resp.Body = &monitoredBody{ReadCloser: resp.Body, trace: t.trace, index: index, started: started, channelID: t.channelID, contentType: resp.Header.Get("Content-Type")}
 		}
 	}
 	t.trace.mu.Unlock()
@@ -400,13 +485,16 @@ func (t *monitoredTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 type monitoredBody struct {
 	io.ReadCloser
-	trace   *requestMonitorTrace
-	index   int
-	started time.Time
+	trace       *requestMonitorTrace
+	index       int
+	started     time.Time
+	contentType string
+	channelID   int
 }
 
 func (b *monitoredBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
+	b.trace.bodies.append(time.Now(), "upstream_response", b.index+1, b.channelID, b.contentType, p[:n])
 	b.trace.mu.Lock()
 	row := &b.trace.data.Upstreams[b.index]
 	row.Bytes += int64(n)

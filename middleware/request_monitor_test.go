@@ -363,6 +363,10 @@ func TestRequestMonitorObservesActiveUpstreamWithoutConsumingStream(t *testing.T
 	engine := gin.New()
 	engine.Use(middleware.RequestId(), middleware.RouteTag("relay"))
 	engine.GET("/stream", func(c *gin.Context) {
+		c.Set("id", 42)
+		c.Set("username", "stream-user")
+		c.Set("token_id", 81)
+		c.Set("token_name", "stream-token")
 		request, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstream.URL, nil)
 		client := &http.Client{Transport: service.MonitorRelayTransport(c, http.DefaultTransport)}
 		response, err := client.Do(request)
@@ -386,6 +390,10 @@ func TestRequestMonitorObservesActiveUpstreamWithoutConsumingStream(t *testing.T
 	<-finished
 	require.NoError(t, requestErr)
 	assert.Equal(t, "running", active.State)
+	assert.Equal(t, "stream-user", active.Username)
+	assert.Equal(t, 42, active.UserID)
+	assert.Equal(t, 81, active.TokenID)
+	assert.Equal(t, "stream-token", active.TokenName)
 	require.Len(t, active.Upstreams, 1)
 	assert.Equal(t, 200, active.Upstreams[0].Status)
 	assert.Empty(t, active.Upstreams[0].End)
@@ -395,4 +403,131 @@ func TestRequestMonitorObservesActiveUpstreamWithoutConsumingStream(t *testing.T
 	assert.Equal(t, "eof", completed.Upstreams[0].End)
 	assert.Empty(t, completed.Upstreams[0].ErrorDetail)
 	assert.Equal(t, int64(len(received)), completed.Upstreams[0].Bytes)
+}
+
+func TestRequestMonitorIdentitySnapshotAndSearch(t *testing.T) {
+	engine := gin.New()
+	engine.Use(middleware.RequestId())
+	engine.POST("/identity", middleware.RouteTag("relay"), func(c *gin.Context) {
+		// 身份只来自上下文，客户端自行声明的名称不影响记录。
+		if c.Query("anonymous") == "" {
+			c.Set("id", 10001)
+			c.Set("username", "监看用户-Alice")
+			c.Set("token_id", 20002)
+			c.Set("token_name", "监看-Codex-CLI")
+			c.Set("token_key", "must-not-capture-token-key")
+		}
+		c.AbortWithStatus(http.StatusBadRequest)
+	})
+	engine.GET("/list", controller.GetRequestMonitor)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/identity", nil)
+	request.Header.Set("X-Username", "spoofed-user")
+	request.Header.Set("X-Token-Name", "spoofed-token")
+	engine.ServeHTTP(response, request)
+	id := response.Header().Get(common.RequestIdKey)
+	detail, ok := service.RequestMonitorDetail(id)
+	require.True(t, ok)
+	assert.Equal(t, "failed", detail.State)
+	assert.Equal(t, 10001, detail.UserID)
+	assert.Equal(t, "监看用户-Alice", detail.Username)
+	assert.Equal(t, 20002, detail.TokenID)
+	assert.Equal(t, "监看-Codex-CLI", detail.TokenName)
+	serialized, err := common.Marshal(detail)
+	require.NoError(t, err)
+	assert.NotContains(t, string(serialized), "must-not-capture-token-key")
+	assert.NotContains(t, string(serialized), "spoofed")
+	for _, query := range []string{"监看用户-alice", "监看-CODEX-cli"} {
+		response = httptest.NewRecorder()
+		engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/list?q="+url.QueryEscape(query), nil))
+		var payload struct {
+			Data struct {
+				Items []service.MonitoredRequest `json:"items"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+		require.Len(t, payload.Data.Items, 1)
+		assert.Equal(t, id, payload.Data.Items[0].ID)
+		assert.Equal(t, detail.Username, payload.Data.Items[0].Username)
+		assert.Equal(t, detail.TokenName, payload.Data.Items[0].TokenName)
+	}
+	response = httptest.NewRecorder()
+	engine.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/identity?anonymous=1", nil))
+	anonymous, ok := service.RequestMonitorDetail(response.Header().Get(common.RequestIdKey))
+	require.True(t, ok)
+	assert.Zero(t, anonymous.UserID)
+	assert.Empty(t, anonymous.Username)
+	assert.Zero(t, anonymous.TokenID)
+	assert.Empty(t, anonymous.TokenName)
+}
+
+func TestRequestMonitorCapturesBodiesWithoutChangingRelay(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{name: "普通正文", text: "你好"},
+		{name: "超过采集上限仍完整转发", text: strings.Repeat("x", service.RequestMonitorBodyLimit+256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"model":"client-model","input":"` + tc.text + `"}`
+			upstreamInput := `{"model":"mapped-model","input":"` + tc.text + `"}`
+			output := "data: {\"delta\":\"" + tc.text + "\"}\n\ndata: [DONE]\n\n"
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				assert.Equal(t, upstreamInput, string(data))
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, output)
+			}))
+			defer upstream.Close()
+			engine := gin.New()
+			engine.Use(middleware.RequestId())
+			engine.POST("/relay", middleware.RouteTag("relay"), func(c *gin.Context) {
+				data, err := io.ReadAll(c.Request.Body)
+				require.NoError(t, err)
+				assert.Equal(t, input, string(data))
+				c.Set("channel_id", 5)
+				req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstream.URL, strings.NewReader(upstreamInput))
+				require.NoError(t, err)
+				req.Header.Set("Authorization", "Bearer must-not-capture-header")
+				req.Header.Set("Content-Type", "application/json")
+				client := &http.Client{Transport: service.MonitorRelayTransport(c, http.DefaultTransport)}
+				response, err := client.Do(req)
+				require.NoError(t, err)
+				defer response.Body.Close()
+				c.Header("Content-Type", response.Header.Get("Content-Type"))
+				_, err = io.Copy(c.Writer, response.Body)
+				require.NoError(t, err)
+			})
+			engine.GET("/list", controller.GetRequestMonitor)
+			engine.GET("/detail/:id", controller.GetRequestMonitorDetail)
+			request := httptest.NewRequest(http.MethodPost, "/relay", strings.NewReader(input))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			assert.Equal(t, output, response.Body.String())
+			id := response.Header().Get(common.RequestIdKey)
+			detail, ok := service.RequestMonitorDetail(id)
+			require.True(t, ok)
+			require.Len(t, detail.Bodies, 4)
+			byDirection := make(map[string]service.MonitoredBody)
+			for _, body := range detail.Bodies {
+				byDirection[body.Direction] = body
+			}
+			for direction, expected := range map[string]string{"request": input, "upstream_request": upstreamInput, "upstream_response": output, "response": output} {
+				body := byDirection[direction]
+				assert.Equal(t, expected[:min(len(expected), service.RequestMonitorBodyLimit)], body.Content)
+				assert.Equal(t, int64(len(expected)), body.TotalBytes)
+				assert.Equal(t, len(expected) > service.RequestMonitorBodyLimit, body.Truncated)
+			}
+			assert.Equal(t, 5, byDirection["upstream_response"].ChannelID)
+			assert.Equal(t, service.RequestMonitorRetention, detail.ExpiresAt.Sub(detail.StartedAt))
+			response = httptest.NewRecorder()
+			engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/list?q="+id, nil))
+			assert.NotContains(t, response.Body.String(), `"bodies"`)
+			response = httptest.NewRecorder()
+			engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/detail/"+id, nil))
+			assert.Equal(t, http.StatusOK, response.Code)
+			assert.Contains(t, response.Body.String(), `"bodies"`)
+			assert.NotContains(t, response.Body.String(), "must-not-capture-header")
+		})
+	}
 }

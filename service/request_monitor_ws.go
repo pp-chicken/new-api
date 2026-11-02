@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -47,6 +48,18 @@ func StartMonitorWSCall(c *gin.Context) {
 		trace.data.ParentID = parent.data.ID
 	}
 	trace.mu.Unlock()
+	// 单次生成来自已在内存中的消息；在标准化替换 Body 前保存原始帧。
+	if c.Request.GetBody != nil {
+		if body, err := c.Request.GetBody(); err == nil {
+			// 流式复制到有界缓存，完整统计大帧长度，不额外分配整帧副本。
+			_, _ = io.Copy(io.Discard, &monitorRequestBody{ReadCloser: body, record: trace.bodies, direction: "request", contentType: "application/x-ndjson"})
+			_ = body.Close()
+			RecordMonitorBody(c.Request.Context(), "request", 0, 0, "application/x-ndjson", []byte("\n"))
+			if wrapped, ok := c.Request.Body.(*monitorRequestBody); ok {
+				c.Request.Body = wrapped.ReadCloser
+			}
+		}
+	}
 }
 
 func MonitorWSConnected(c *gin.Context) {
@@ -58,7 +71,7 @@ func MonitorWSConnected(c *gin.Context) {
 	defer trace.mu.Unlock()
 	trace.data.Kind = "websocket"
 	trace.data.Status = http.StatusSwitchingProtocols
-	trace.data.UserID = c.GetInt("id")
+	trace.data.captureIdentity(c)
 	trace.data.WebSocket = &MonitorWebSocket{}
 }
 
@@ -172,7 +185,8 @@ func UpdateMonitorRequestIdentity(c *gin.Context) {
 	events := RequestPolicy(c).Events()
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
-	trace.data.UserID, trace.data.ChannelID = c.GetInt("id"), c.GetInt("channel_id")
+	trace.data.captureIdentity(c)
+	trace.data.ChannelID = c.GetInt("channel_id")
 	model := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	trace.data.Model = model[:min(len(model), 256)]
 	if len(events) > 128 {

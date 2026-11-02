@@ -94,7 +94,7 @@ func setupResponsesWSRequestTest(t *testing.T) (*model.User, *model.Token) {
 	// user a separate quota bucket, including when the tests run with -count.
 	user := &model.User{Id: 5062000 + int(responsesWSTestUserSequence.Add(1)), Username: "responses-ws-user", Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1}
 	require.NoError(t, db.Create(user).Error)
-	token := &model.Token{UserId: user.Id, Key: "responseswstoken", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 100}
+	token := &model.Token{UserId: user.Id, Name: "responses-ws-token", Key: "responseswstoken", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 100}
 	require.NoError(t, db.Create(token).Error)
 	t.Cleanup(func() {
 		require.NoError(t, db.Unscoped().Delete(token).Error)
@@ -579,6 +579,7 @@ func TestResponsesWebSocketInterruptReusesConnection(t *testing.T) {
 
 func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	type upstreamRequest struct {
+		Raw                string `json:"-"`
 		Authorization      string
 		Type               string `json:"type"`
 		Model              string `json:"model"`
@@ -597,6 +598,7 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 				return
 			}
 			event.Authorization = r.Header.Get("Authorization")
+			event.Raw = string(data)
 			received <- event
 			if index == 2 {
 				duplicate := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`
@@ -612,6 +614,7 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	})
 	client, user, token := fixture.client, fixture.user, fixture.token
 	var monitorParentID string
+	var captured []map[string]string
 
 	for index, payload := range []string{
 		`{"type":"response.create","model":"ws-billing","input":"first","service_tier":"default"}`,
@@ -640,6 +643,9 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		require.Equal(t, "completed", call.State)
 		assert.Equal(t, "completed", call.StreamOutcome)
 		assert.Equal(t, "ws-billing", call.Model)
+		assert.Equal(t, user.Username, call.Username)
+		assert.Equal(t, token.Id, call.TokenID)
+		assert.Equal(t, token.Name, call.TokenName)
 		require.NotEmpty(t, call.ParentID)
 		if index == 0 {
 			monitorParentID = call.ParentID
@@ -651,6 +657,10 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 				continue
 			}
 			assert.Equal(t, "running", row.State)
+			assert.Equal(t, user.Username, row.Username)
+			assert.Equal(t, user.Id, row.UserID)
+			assert.Equal(t, token.Id, row.TokenID)
+			assert.Equal(t, token.Name, row.TokenName)
 			assert.Empty(t, row.StreamOutcome)
 			assert.Equal(t, 101, row.Status)
 			require.NotNil(t, row.WebSocket)
@@ -661,6 +671,7 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		}
 
 		observed := <-received
+		captured = append(captured, map[string]string{"request": payload + "\n", "upstream_request": observed.Raw + "\n", "upstream_response": string(data) + "\n", "response": string(data) + "\n"})
 		assert.Equal(t, "Bearer upstream-first", observed.Authorization)
 		assert.Equal(t, "gpt-4o", observed.Model)
 		assert.Equal(t, "response.create", observed.Type)
@@ -723,6 +734,17 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	assert.Equal(t, 3000, token.UsedQuota)
 	assert.Equal(t, 97000, user.Quota)
 	assert.Equal(t, 3000, user.UsedQuota)
+	fixture.closeAndWait(t)
+	for index, expected := range captured {
+		detail, ok := service.RequestMonitorDetail(fmt.Sprintf("%s-ws-%d", monitorParentID, index))
+		require.True(t, ok)
+		require.Len(t, detail.Bodies, 4)
+		for _, body := range detail.Bodies {
+			assert.Equal(t, expected[body.Direction], body.Content, "第 %d 次请求的 %s 不能混入其他轮次帧", index+1, body.Direction)
+			assert.Equal(t, int64(len(expected[body.Direction])), body.TotalBytes)
+			assert.False(t, body.Truncated)
+		}
+	}
 }
 
 // Both transports must reach the same upstream target with the same
@@ -905,11 +927,14 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			preConsumed := make(chan int, 1)
 			tokenID := make(chan int, 1)
+			upstreamRequests := make(chan string, 1)
 			// Pre-consume no longer estimates completion tokens, so an output-priced expression reserves nothing to refund.
 			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
-				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+				_, requestBody, err := ws.ReadMessage()
+				if !assert.NoError(t, err) {
 					return
 				}
+				upstreamRequests <- string(requestBody)
 				var token model.Token
 				if !assert.NoError(t, model.DB.First(&token, <-tokenID).Error) {
 					return
@@ -963,6 +988,19 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 				}
 			}
 			require.NotNil(t, call)
+			detail, ok := service.RequestMonitorDetail(call.ID)
+			require.True(t, ok)
+			require.Len(t, detail.Bodies, 4)
+			byDirection := make(map[string]service.MonitoredBody)
+			for _, body := range detail.Bodies {
+				byDirection[body.Direction] = body
+			}
+			assert.Equal(t, "{\"type\":\"response.create\",\"model\":\"ws-billing\",\"input\":\"hi\",\"max_output_tokens\":10}\n", byDirection["request"].Content)
+			assert.Equal(t, <-upstreamRequests+"\n", byDirection["upstream_request"].Content)
+			assert.Equal(t, tc.upstream+"\n", byDirection["upstream_response"].Content)
+			var capturedRejection map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(byDirection["response"].Content, &capturedRejection))
+			assert.Equal(t, rejection, capturedRejection)
 			assert.Equal(t, "failed", call.State)
 			assert.Equal(t, tc.status, call.Status)
 			assert.Equal(t, "done", call.StreamEnd)

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"net/http"
@@ -11,10 +12,12 @@ type monitoredResponseWriter struct {
 	gin.ResponseWriter
 	mu  sync.Mutex
 	err error
+	ctx context.Context
 }
 
 func (w *monitoredResponseWriter) Write(data []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(data)
+	service.RecordMonitorBody(w.ctx, "response", 0, 0, w.Header().Get("Content-Type"), data[:n])
 	if err != nil {
 		w.mu.Lock()
 		w.err = err
@@ -25,6 +28,7 @@ func (w *monitoredResponseWriter) Write(data []byte) (int, error) {
 
 func (w *monitoredResponseWriter) WriteString(data string) (int, error) {
 	n, err := w.ResponseWriter.WriteString(data)
+	service.RecordMonitorBody(w.ctx, "response", 0, 0, w.Header().Get("Content-Type"), []byte(data[:n]))
 	if err != nil {
 		w.mu.Lock()
 		w.err = err
@@ -36,7 +40,7 @@ func (w *monitoredResponseWriter) WriteString(data string) (int, error) {
 func monitorRelayRequest(c *gin.Context) {
 	service.StartRequestMonitor(c)
 	original := c.Writer
-	writer := &monitoredResponseWriter{ResponseWriter: original}
+	writer := &monitoredResponseWriter{ResponseWriter: original, ctx: c.Request.Context()}
 	c.Writer = writer
 	defer func() {
 		recovered := recover()
