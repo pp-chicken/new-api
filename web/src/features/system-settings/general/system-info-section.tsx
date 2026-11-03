@@ -241,13 +241,12 @@ export function SystemInfoSection({ defaultValues }: SystemInfoSectionProps) {
                   <FormItem>
                     <FormLabel>{t('Documentation Link')}</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder={t('https://docs.example.com')}
-                        {...field}
-                      />
+                      <Input placeholder='/docs' {...field} />
                     </FormControl>
                     <FormDescription>
-                      {t('Link to your documentation site')}
+                      {t(
+                        'Use /docs for the built-in documentation, or enter a custom documentation URL.'
+                      )}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

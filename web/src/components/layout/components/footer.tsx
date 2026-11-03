@@ -22,11 +22,13 @@ import { useTranslation } from 'react-i18next'
 
 import { useStatus } from '@/hooks/use-status'
 import { useSystemConfig } from '@/hooks/use-system-config'
+import { getDocsLink } from '@/lib/docs'
 import { cn } from '@/lib/utils'
 
 interface FooterLink {
   text: string
   href: string
+  hash?: string
 }
 
 interface FooterColumnProps {
@@ -50,7 +52,7 @@ const NEW_API_FOOTER_ATTRIBUTION_KEY = [
 
 function FooterLinkItem(props: { link: FooterLink }) {
   const { t } = useTranslation()
-  const isExternal = props.link.href.startsWith('http')
+  const isExternal = /^(https?:)?\/\//i.test(props.link.href)
   const label = t(props.link.text)
 
   if (isExternal) {
@@ -69,6 +71,7 @@ function FooterLinkItem(props: { link: FooterLink }) {
   return (
     <Link
       to={props.link.href}
+      hash={props.link.hash}
       className='text-muted-foreground hover:text-foreground text-sm transition-colors duration-200'
     >
       {label}
@@ -151,6 +154,8 @@ function ProjectAttribution(props: { currentYear: number; inline?: boolean }) {
 
 export function Footer(props: FooterProps) {
   const { t } = useTranslation()
+  const { status } = useStatus()
+  const docsLink = getDocsLink(status?.docs_link)
   const {
     systemName,
     logo: systemLogo,
@@ -170,15 +175,18 @@ export function Footer(props: FooterProps) {
         links: [
           {
             text: t('footer.columns.about.links.aboutProject'),
-            href: 'https://docs.newapi.pro/wiki/project-introduction/',
+            href: docsLink.href,
+            hash: docsLink.href === '/docs' ? 'quick-start' : undefined,
           },
           {
             text: t('footer.columns.about.links.contact'),
-            href: 'https://docs.newapi.pro/support/community-interaction/',
+            href: docsLink.href,
+            hash: docsLink.href === '/docs' ? 'faq' : undefined,
           },
           {
             text: t('footer.columns.about.links.features'),
-            href: 'https://docs.newapi.pro/wiki/features-introduction/',
+            href: docsLink.href,
+            hash: docsLink.href === '/docs' ? 'api-reference' : undefined,
           },
         ],
       },
@@ -187,15 +195,18 @@ export function Footer(props: FooterProps) {
         links: [
           {
             text: t('footer.columns.docs.links.quickStart'),
-            href: 'https://docs.newapi.pro/getting-started/',
+            href: docsLink.href,
+            hash: docsLink.href === '/docs' ? 'quick-start' : undefined,
           },
           {
-            text: t('footer.columns.docs.links.installation'),
-            href: 'https://docs.newapi.pro/installation/',
+            text: t('Client configuration'),
+            href: docsLink.href,
+            hash: docsLink.href === '/docs' ? 'client-setup' : undefined,
           },
           {
             text: t('footer.columns.docs.links.apiDocs'),
-            href: 'https://docs.newapi.pro/api/',
+            href: docsLink.href,
+            hash: docsLink.href === '/docs' ? 'api-reference' : undefined,
           },
         ],
       },
@@ -217,7 +228,7 @@ export function Footer(props: FooterProps) {
         ],
       },
     ],
-    [t]
+    [t, docsLink.href]
   )
 
   const displayColumns = props.columns ?? fallbackColumns
@@ -272,14 +283,14 @@ export function Footer(props: FooterProps) {
           {/* Links columns */}
           {isDemoSiteMode && (
             <div className='grid grid-cols-3 gap-8 md:gap-16'>
-              {displayColumns.map((column, index) => (
-                <div key={index}>
+              {displayColumns.map((column) => (
+                <div key={column.title}>
                   <p className='text-muted-foreground/50 mb-3 text-xs font-medium tracking-wider uppercase'>
                     {t(column.title)}
                   </p>
                   <ul className='space-y-2.5'>
-                    {column.links.map((link, linkIndex) => (
-                      <li key={linkIndex}>
+                    {column.links.map((link) => (
+                      <li key={`${link.text}-${link.href}-${link.hash ?? ''}`}>
                         <FooterLinkItem link={link} />
                       </li>
                     ))}
