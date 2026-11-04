@@ -76,6 +76,7 @@ func SetRelayRouter(router *gin.Engine) {
 		// Responses WebSocket route. Channel selection happens after the first
 		// response.create event; each event runs the ordinary request limiter.
 		relayV1Router.GET("/responses", controller.ResponsesWebSocket)
+		relayV1Router.GET("/network-test", middleware.NetworkTestRateLimit(), controller.NetworkTest)
 	}
 	relayV1Router.Use(middleware.ModelRequestRateLimit())
 	{

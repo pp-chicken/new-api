@@ -213,6 +213,11 @@ func UploadRateLimit() func(c *gin.Context) {
 	return rateLimitFactory(common.UploadRateLimitNum, common.UploadRateLimitDuration, "UP")
 }
 
+// NetworkTestRateLimit 在令牌认证后按用户限制测速，避免通过多个令牌绕过限制。
+func NetworkTestRateLimit() func(c *gin.Context) {
+	return userRateLimitFactory(3, 60, "NT")
+}
+
 // userRateLimitFactory creates a rate limiter keyed by authenticated user ID
 // instead of client IP, making it resistant to proxy rotation attacks.
 // Must be used AFTER authentication middleware (UserAuth).
