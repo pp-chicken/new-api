@@ -140,6 +140,58 @@ func TestNetworkTestRouteAuthenticationAndLimits(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("稳定性测试在连接期间重新验证访问权限", func(t *testing.T) {
+		stabilityDialer := websocket.Dialer{Subprotocols: []string{networktest.StabilitySubprotocol}, HandshakeTimeout: time.Second}
+		var connections []*websocket.Conn
+		for _, change := range []string{"令牌禁用", "令牌过期", "用户禁用", "IP 变更"} {
+			key := newToken(common.UserStatusEnabled, common.TokenStatusEnabled, -1, nil)
+			conn, response, err := stabilityDialer.Dial(strings.Replace(endpoint, "bytes=65536", "duration_ms=60000", 1), http.Header{"Authorization": {"Bearer " + key}})
+			require.NoError(t, err)
+			defer conn.Close()
+			assert.NotEmpty(t, response.Header.Get(common.RequestIdKey))
+			require.NoError(t, networktest.AwaitStabilityReady(conn, time.Second))
+			_, err = networktest.ProbeStability(conn, 1, time.Second)
+			require.NoError(t, err)
+			connections = append(connections, conn)
+			switch change {
+			case "令牌禁用":
+				require.NoError(t, model.DB.Model(&model.Token{}).Where("key = ?", key).Update("status", common.TokenStatusDisabled).Error)
+			case "令牌过期":
+				require.NoError(t, model.DB.Model(&model.Token{}).Where("key = ?", key).Update("expired_time", time.Now().Add(-time.Minute).Unix()).Error)
+			case "用户禁用":
+				var token model.Token
+				require.NoError(t, model.DB.Where("key = ?", key).First(&token).Error)
+				require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", token.UserId).Update("status", common.UserStatusDisabled).Error)
+			case "IP 变更":
+				require.NoError(t, model.DB.Model(&model.Token{}).Where("key = ?", key).Update("allow_ips", "192.0.2.1").Error)
+			}
+		}
+		// 等待正常探测间隔，确保拒绝原因来自权限变更，而不是频率限制。
+		<-time.After(networktest.StabilityInterval)
+		for _, conn := range connections {
+			_, err := networktest.ProbeStability(conn, 2, time.Second)
+			var closeErr *websocket.CloseError
+			require.ErrorAs(t, err, &closeErr)
+			assert.Equal(t, websocket.ClosePolicyViolation, closeErr.Code)
+			assert.Equal(t, "测试令牌已失效或访问被拒绝", closeErr.Text)
+		}
+	})
+
+	t.Run("稳定性测试时长边界在握手前校验", func(t *testing.T) {
+		key := newToken(common.UserStatusEnabled, common.TokenStatusEnabled, -1, nil)
+		stabilityDialer := websocket.Dialer{Subprotocols: []string{networktest.StabilitySubprotocol}, HandshakeTimeout: time.Second}
+		for _, milliseconds := range []string{"999", "86400001", "9223372036854775807"} {
+			conn, response, err := stabilityDialer.Dial(strings.Replace(endpoint, "bytes=65536", "duration_ms="+milliseconds, 1), http.Header{"Authorization": {"Bearer " + key}})
+			if conn != nil {
+				_ = conn.Close()
+			}
+			require.Error(t, err)
+			require.NotNil(t, response)
+			_ = response.Body.Close()
+			assert.Equal(t, http.StatusBadRequest, response.StatusCode)
+		}
+	})
 }
 
 func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {

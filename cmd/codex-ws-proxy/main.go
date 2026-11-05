@@ -12,10 +12,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/QuantumNous/new-api/pkg/networktest"
@@ -50,13 +52,20 @@ func main() {
 	networkTest := flag.Bool("network-test", false, "测试到 New API 的 WebSocket 上传/下载链路后退出（需要服务端支持）")
 	testBytes := flag.Int("test-bytes", networktest.DefaultBytes, "测速时每个方向的字节数，范围 65536～33554432")
 	testTimeout := flag.Duration("test-timeout", networktest.DefaultTimeout, "测速每阶段超时，最大 2m")
+	testDuration := flag.Duration("test-duration", 0, "同一 WebSocket 的稳定性测试时长，如 10m；每 5 秒收发 1 KiB，范围 1s～24h")
 	flag.Parse()
+	if *testDuration != 0 && !*networkTest {
+		log.Fatal("-test-duration 必须与 -network-test 一起使用")
+	}
 	if *networkTest {
 		if *install || *uninstall || *status {
 			log.Fatal("-network-test 不能与服务管理参数同时使用")
 		}
 		key := envOr("CODEX_WS_PROXY_API_KEY", envOr("OPENAI_API_KEY", ""))
-		if err := runNetworkTest(context.Background(), *target, key, *testBytes, *testTimeout, os.Stdout); err != nil {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := runNetworkCheck(ctx, *target, key, *testBytes, *testTimeout, *testDuration, os.Stdout)
+		stop()
+		if err != nil {
 			log.Fatal(err)
 		}
 		return

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,177 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNetworkStabilityUsesOneConnectionAndSmallProbes(t *testing.T) {
+	var connections, checks atomic.Int32
+	finished := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connections.Add(1)
+		assert.Equal(t, "/v1/network-test", r.URL.Path)
+		assert.Equal(t, "5300", r.URL.Query().Get("duration_ms"))
+		assert.Empty(t, r.URL.Query().Get("bytes"))
+		upgrader := websocket.Upgrader{Subprotocols: []string{networktest.StabilitySubprotocol}}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			finished <- err
+			return
+		}
+		defer conn.Close()
+		finished <- networktest.ServeStability(conn, 10*time.Second, func() error {
+			checks.Add(1)
+			return nil
+		})
+	}))
+	defer server.Close()
+	var output bytes.Buffer
+	require.NoError(t, runNetworkCheck(context.Background(), server.URL, "secret", networktest.MaxBytes, time.Second, 5300*time.Millisecond, &output))
+	select {
+	case err := <-finished:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("客户端测试结束后服务端没有释放连接")
+	}
+	assert.EqualValues(t, 1, connections.Load())
+	assert.EqualValues(t, 2, checks.Load())
+	assert.Contains(t, output.String(), "探测次数：2；成功：2；失败：0；结束时中止：0")
+	assert.Contains(t, output.String(), "上传 2048 字节，回传 2048 字节")
+	assert.Contains(t, output.String(), "达到设定时长")
+	assert.NotContains(t, output.String(), "MiB/s")
+	assert.NotContains(t, output.String(), "secret")
+}
+
+func TestNetworkStabilityStopsAndSummarizes(t *testing.T) {
+	for _, tc := range []struct {
+		mode, expected string
+	}{
+		{"断开", "失败：1；结束时中止：0"},
+		{"间隔中断开", "失败：0；结束时中止：0"},
+		{"错误回包", "失败：1；结束时中止：0"},
+		{"探测超时", "失败：1；结束时中止：0"},
+		{"总时长截止", "失败：0；结束时中止：1"},
+		{"用户中止", "失败：0；结束时中止：1"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var connections atomic.Int32
+			done := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(done)
+				connections.Add(1)
+				upgrader := websocket.Upgrader{Subprotocols: []string{networktest.StabilitySubprotocol}}
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("stability-ready 1024 5000"))
+				_, payload, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				switch tc.mode {
+				case "断开":
+					return
+				case "间隔中断开":
+					_ = conn.WriteMessage(websocket.BinaryMessage, payload)
+					return
+				case "错误回包":
+					payload[0] ^= 1
+					_ = conn.WriteMessage(websocket.BinaryMessage, payload)
+				case "用户中止":
+					cancel()
+				}
+				_, _, _ = conn.ReadMessage()
+			}))
+			defer server.Close()
+			timeout := 2 * time.Second
+			if tc.mode == "探测超时" {
+				timeout = 100 * time.Millisecond
+			}
+			var output bytes.Buffer
+			err := runNetworkCheck(ctx, server.URL, "secret", networktest.DefaultBytes, timeout, time.Second, &output)
+			require.Error(t, err)
+			<-done
+			assert.EqualValues(t, 1, connections.Load())
+			assert.Contains(t, output.String(), "长连接稳定性汇总")
+			assert.Contains(t, output.String(), tc.expected)
+			assert.Contains(t, output.String(), "重连：0 次")
+			if tc.mode == "间隔中断开" {
+				assert.Contains(t, output.String(), "失败阶段：间隔等待")
+				assert.Contains(t, output.String(), "连接在探测间隔中发生异常")
+			} else {
+				assert.NotContains(t, output.String(), "已完成探测成功率：100.00%")
+			}
+			if tc.mode == "总时长截止" {
+				assert.Contains(t, output.String(), "达到设定时长")
+				assert.NotContains(t, output.String(), "失败阶段：")
+			}
+		})
+	}
+}
+
+func TestNetworkStabilitySummaryStatistics(t *testing.T) {
+	started := time.Date(2026, 11, 5, 1, 0, 0, 0, time.UTC)
+	summary := stabilitySummary{
+		started: started, lastSuccess: started.Add(20 * time.Second),
+		attempts: 6, failed: 1, interrupted: 1,
+		rtts: []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 20 * time.Millisecond, 100 * time.Millisecond},
+	}
+	var output bytes.Buffer
+	summary.write(&output, time.Minute, started.Add(25*time.Second), "测试结束")
+	assert.Contains(t, output.String(), "探测次数：6；成功：4；失败：1；结束时中止：1")
+	assert.Contains(t, output.String(), "已完成探测成功率：80.00%")
+	assert.Contains(t, output.String(), "最小 10ms；平均 40ms；P95 100ms；最大 100ms")
+	assert.Contains(t, output.String(), "相邻探测 RTT 最大变化：80ms")
+	assert.Contains(t, output.String(), "距测试结束：5s")
+	assert.Contains(t, output.String(), "上传 4096 字节，回传 4096 字节")
+}
+
+func TestNetworkStabilityRejectsInvalidDurationAndUnsupportedServer(t *testing.T) {
+	for _, duration := range []time.Duration{-time.Second, time.Millisecond, 25 * time.Hour} {
+		var output bytes.Buffer
+		err := runNetworkCheck(context.Background(), "wss://example.com/v1", "secret", networktest.DefaultBytes, time.Second, duration, &output)
+		require.ErrorContains(t, err, "时长")
+		assert.Empty(t, output.String())
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	var output bytes.Buffer
+	err := runNetworkCheck(context.Background(), server.URL, "secret", networktest.DefaultBytes, time.Second, time.Minute, &output)
+	require.ErrorContains(t, err, "请部署支持长连接稳定性协议")
+}
+
+func TestNetworkStabilityServerRejectsBurstAndReplay(t *testing.T) {
+	for _, sequence := range []uint64{1, 2} {
+		t.Run(fmt.Sprint(sequence), func(t *testing.T) {
+			finished := make(chan error, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upgrader := websocket.Upgrader{}
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					finished <- err
+					return
+				}
+				defer conn.Close()
+				finished <- networktest.ServeStability(conn, time.Second, func() error { return nil })
+			}))
+			defer server.Close()
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, networktest.AwaitStabilityReady(conn, time.Second))
+			_, err = networktest.ProbeStability(conn, 1, time.Second)
+			require.NoError(t, err)
+			_, err = networktest.ProbeStability(conn, sequence, time.Second)
+			require.Error(t, err)
+			require.Error(t, <-finished)
+		})
+	}
+}
 
 func TestNetworkTestActualUploadAndDownload(t *testing.T) {
 	const size = 249027

@@ -18,6 +18,17 @@ import (
 )
 
 func runNetworkTest(ctx context.Context, target, key string, size int, timeout time.Duration, output io.Writer) error {
+	return runNetworkCheck(ctx, target, key, size, timeout, 0, output)
+}
+
+func runNetworkCheck(ctx context.Context, target, key string, size int, timeout, duration time.Duration, output io.Writer) error {
+	if duration != 0 {
+		if err := networktest.ValidateStabilityDuration(duration); err != nil {
+			return err
+		}
+		// 稳定性模式固定小样本，不使用单次测速的 -test-bytes。
+		size = networktest.MinBytes
+	}
 	if err := networktest.Validate(size, timeout); err != nil {
 		return err
 	}
@@ -47,21 +58,37 @@ func runNetworkTest(ctx context.Context, target, key string, size int, timeout t
 	u.Path = strings.TrimRight(u.Path, "/") + networktest.Path
 	u.RawPath = ""
 	u.RawQuery = "bytes=" + strconv.Itoa(size)
-	fmt.Fprintf(output, "测速目标：%s\n每个方向：%d 字节（%.3f MiB）；每阶段超时：%s\n", u, size, float64(size)/(1<<20), timeout)
+	subprotocol := networktest.Subprotocol
+	if duration != 0 {
+		u.RawQuery = "duration_ms=" + strconv.FormatInt(duration.Milliseconds(), 10)
+		subprotocol = networktest.StabilitySubprotocol
+		fmt.Fprintf(output, "稳定性测试目标：%s\n同一 WebSocket 持续测试 %s；每次上传和回传各 1 KiB，回包后等待 %s；探测超时：%s\n", u, duration, networktest.StabilityInterval, timeout)
+		fmt.Fprintln(output, "不自动重连，不执行大流量测速；-test-bytes 仅用于单次测速。按 Ctrl+C 可提前结束并输出汇总。")
+	} else {
+		fmt.Fprintf(output, "测速目标：%s\n每个方向：%d 字节（%.3f MiB）；每阶段超时：%s\n", u, size, float64(size)/(1<<20), timeout)
+	}
 	fmt.Fprintln(output, "链路：本机代理进程 → New API；连接方式与代理上游一致，不读取 HTTP_PROXY/HTTPS_PROXY。")
 
 	dialer := p.dialer
 	dialer.HandshakeTimeout = timeout
-	dialer.Subprotocols = []string{networktest.Subprotocol}
+	dialer.Subprotocols = []string{subprotocol}
 	dialer.EnableCompression = false
 	phase := "DNS/TCP"
 	var transportTime, tlsTime time.Duration
 	var tlsStarted, upgradeStarted time.Time
-	dialer.NetDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+	var stopOnCancel func() bool
+	defer func() {
+		if stopOnCancel != nil {
+			stopOnCancel()
+		}
+	}()
+	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
 		started := time.Now()
-		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		conn, err := (&net.Dialer{}).DialContext(dialCtx, network, address)
 		transportTime = time.Since(started)
 		if err == nil {
+			// 也覆盖 TCP 已连接但 TLS/Upgrade 尚未完成时的 Ctrl+C。
+			stopOnCancel = context.AfterFunc(ctx, func() { _ = conn.Close() })
 			phase = "WebSocket 握手"
 			upgradeStarted = time.Now()
 		}
@@ -97,6 +124,10 @@ func runNetworkTest(ctx context.Context, target, key string, size int, timeout t
 	if err != nil {
 		if response != nil {
 			switch response.StatusCode {
+			case http.StatusBadRequest:
+				if duration != 0 {
+					return fmt.Errorf("稳定性测试握手被拒绝（HTTP 400）：请部署支持长连接稳定性协议的 New API 服务端")
+				}
 			case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusOK:
 				return fmt.Errorf("测速握手失败（HTTP %d）：请先部署包含 /v1/network-test 的 New API，并确认反向代理允许该 WebSocket 路由", response.StatusCode)
 			case http.StatusUnauthorized, http.StatusForbidden:
@@ -108,10 +139,15 @@ func runNetworkTest(ctx context.Context, target, key string, size int, timeout t
 		return fmt.Errorf("%s阶段失败: %w", phase, err)
 	}
 	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	if conn.Subprotocol() != networktest.Subprotocol {
+	if conn.Subprotocol() != subprotocol {
 		return fmt.Errorf("服务端没有协商测速协议，请检查 New API 版本及反向代理路由")
+	}
+	if duration != 0 {
+		// 稳定性模式自行处理取消并先发 Close 帧，避免这里抢先断开 TCP。
+		if stopOnCancel != nil {
+			stopOnCancel()
+		}
+		return runNetworkStability(ctx, conn, duration, timeout, output)
 	}
 	fmt.Fprintln(output, "开始往返、上传和下载测试……")
 	result, err := networktest.Run(conn, size, timeout)
