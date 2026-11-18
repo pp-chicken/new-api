@@ -687,3 +687,99 @@ func TestHTTPStreamLogsFlushFailure(t *testing.T) {
 	assert.Contains(t, logs.String(), "event=close_sent side=upstream close_code=1011")
 	assert.Contains(t, logs.String(), "client_messages_out=0")
 }
+
+func TestModelCatalogCacheIsolationRefreshAndFailure(t *testing.T) {
+	var calls atomic.Int32
+	var status atomic.Int32
+	var invalidBody atomic.Bool
+	status.Store(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		assert.Equal(t, "/v1/codex/models", r.URL.Path)
+		if status.Load() != http.StatusOK {
+			w.WriteHeader(int(status.Load()))
+			return
+		}
+		if invalidBody.Load() {
+			_, _ = io.WriteString(w, `{"models":`)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"models":[{"slug":%q}]}`, r.Header.Get("Authorization")+r.URL.RawQuery)
+	}))
+	defer server.Close()
+	p, err := newProxy(server.URL, false)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.cacheContext = ctx
+	request := func(key, query string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/v1/codex/models"+query, nil)
+		r.Header.Set("Authorization", key)
+		w := httptest.NewRecorder()
+		p.cachedModels(w, r)
+		return w
+	}
+	a := request("Bearer a", "?client_version=1")
+	require.Equal(t, http.StatusOK, a.Code)
+	assert.Equal(t, a.Body.String(), request("Bearer a", "?client_version=1").Body.String())
+	assert.EqualValues(t, 1, calls.Load())
+	assert.NotEqual(t, a.Body.String(), request("Bearer b", "?client_version=1").Body.String())
+	assert.NotEqual(t, a.Body.String(), request("Bearer a", "?client_version=2").Body.String())
+	assert.EqualValues(t, 3, calls.Load())
+	p.modelsMu.Lock()
+	var entry *modelCatalogCache
+	for _, v := range p.models {
+		if v.header.Get("Authorization") == "Bearer a" && v.query == "client_version=1" {
+			entry = v
+		}
+	}
+	p.modelsMu.Unlock()
+	require.NotNil(t, entry)
+	status.Store(http.StatusBadGateway)
+	p.refreshModelCatalog(ctx, entry)
+	assert.Equal(t, a.Body.String(), request("Bearer a", "?client_version=1").Body.String())
+	entry.mu.Lock()
+	entry.updated = time.Now().Add(-6 * time.Minute)
+	entry.mu.Unlock()
+	assert.Equal(t, http.StatusServiceUnavailable, request("Bearer a", "?client_version=1").Code)
+	status.Store(http.StatusOK)
+	p.refreshModelCatalog(ctx, entry)
+	assert.Equal(t, http.StatusOK, request("Bearer a", "?client_version=1").Code)
+	invalidBody.Store(true)
+	p.refreshModelCatalog(ctx, entry)
+	assert.Equal(t, a.Body.String(), request("Bearer a", "?client_version=1").Body.String())
+	status.Store(http.StatusUnauthorized)
+	p.refreshModelCatalog(ctx, entry)
+	assert.Equal(t, http.StatusUnauthorized, request("Bearer a", "?client_version=1").Code)
+}
+
+func TestModelCatalogCacheContinuesAfterClientCancellation(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		close(started)
+		<-release
+		_, _ = io.WriteString(w, `{"models":[]}`)
+	}))
+	defer server.Close()
+	p, err := newProxy(server.URL, false)
+	require.NoError(t, err)
+	background, stop := context.WithCancel(context.Background())
+	defer stop()
+	p.cacheContext = background
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest(http.MethodGet, "/v1/codex/models", nil).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer secret")
+	done := make(chan struct{})
+	go func() { p.cachedModels(httptest.NewRecorder(), r); close(done) }()
+	<-started
+	cancel()
+	<-done
+	close(release)
+	w := httptest.NewRecorder()
+	p.cachedModels(w, r.Clone(context.Background()))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"models":[]}`, w.Body.String())
+	assert.EqualValues(t, 1, calls.Load())
+}

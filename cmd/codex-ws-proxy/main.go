@@ -31,14 +31,17 @@ const (
 )
 
 type proxy struct {
-	baseURL  *url.URL
-	wsURL    string
-	verbose  bool
-	logger   *log.Logger
-	sequence atomic.Uint64
-	dialer   websocket.Dialer
-	upgrader websocket.Upgrader
-	client   *http.Client
+	baseURL      *url.URL
+	wsURL        string
+	verbose      bool
+	logger       *log.Logger
+	sequence     atomic.Uint64
+	dialer       websocket.Dialer
+	upgrader     websocket.Upgrader
+	client       *http.Client
+	modelsMu     sync.Mutex
+	models       map[[32]byte]*modelCatalogCache
+	cacheContext context.Context
 }
 
 func main() {
@@ -95,12 +98,20 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	p.cacheContext = ctx
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", p.health)
 	mux.HandleFunc("/v1/responses", p.responses)
+	mux.HandleFunc("/v1/codex/models", p.cachedModels)
 	mux.HandleFunc("/v1/", p.forwardHTTP)
 	mux.HandleFunc("/", p.forwardHTTP)
 	server := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 15 * time.Second}
+	go func() {
+		<-ctx.Done()
+		_ = server.Close()
+	}()
 	p.logf("listening on http://%s; upstream base=%s; responses websocket=%s", *listen, p.baseURL, p.wsURL)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
