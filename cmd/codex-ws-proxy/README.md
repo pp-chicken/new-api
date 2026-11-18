@@ -116,6 +116,15 @@ RTT 是上传和回传合计的应用层往返耗时，包含 New API 处理及�
 
 服务会写入 `~/Library/LaunchAgents/com.codex.ws-proxy.plist`，登录后自动启动，异常退出会自动重启。日志写入二进制旁边的 `logs/` 目录。
 
+安装时也会注册独立的更新服务 `com.codex.ws-proxy.update`。每 60 秒检查一次已安装路径上的二进制：内容变化后，按原有 plist 重新加载代理，保留监听地址、上游、日志和令牌文件设置。后续将新构建的二进制原子替换到同一路径即可，例如：
+
+```bash
+go build -o ./build/codex-ws-proxy.next ./cmd/codex-ws-proxy &&
+  mv -f ./build/codex-ws-proxy.next ./build/codex-ws-proxy
+```
+
+这会中断当时的连接并清空模型缓存。更新服务不拉取远程代码；未变化时不会重启，重新加载失败会在下次检查时重试。旧版安装需要先用新版执行一次 `-install-service`，带上原有参数。卸载代理时也会移除更新服务。
+
 管理命令：
 
 ```bash
@@ -134,6 +143,16 @@ RTT 是上传和回传合计的应用层往返耗时，包含 New API 处理及�
 ```
 
 然后把 Codex 的 API Base URL 设置为 `http://127.0.0.1:28080/v1`，API Key 仍使用 new-api 的访问令牌。代理会转发 `Authorization`、`User-Agent`、`OpenAI-Organization` 和 `OpenAI-Project` 请求头。
+
+**可选的默认令牌**：前台启动可设置专用环境变量 `CODEX_WS_PROXY_DEFAULT_TOKEN`；macOS 服务可在安装时指定令牌文件（优先于环境变量）。文件只存原始 New API 令牌，不加 `Bearer ` 前缀。例如在 zsh 中：
+
+```zsh
+mkdir -p ~/.config/codex-ws-proxy
+(umask 077; read -rs 'token?请输入 New API 令牌：' && print -rn -- "$token" > ~/.config/codex-ws-proxy/token)
+./build/codex-ws-proxy -install-service -default-token-file ~/.config/codex-ws-proxy/token
+```
+
+代理在启动时读取令牌，plist 仅保存文件路径。轮换文件内容后重启代理。只有本机客户端访问回环地址的 `/v1/*` 且未发送 `Authorization` 头时才会补上默认令牌；显式凭据即使被上游拒绝，也不会改用默认令牌。带浏览器 Origin 或 Fetch Metadata 的请求不能借用默认令牌。配置默认令牌时仅允许回环监听，远程上游必须使用 HTTPS/WSS。
 
 代理支持以下入口：
 
@@ -155,6 +174,6 @@ go build -o ./build/codex-ws-proxy ./cmd/codex-ws-proxy
 
 `GET /v1/codex/models` 自动使用内存缓存，按认证请求头、项目及查询参数隔离。首次访问触发上游加载；同一目录的并发请求共用一次加载，即使客户端提前断开，后台加载仍会继续（单次同步最多 30 秒）。首次尚未加载完成时仍需要等待，后续命中直接返回缓存。
 
-首次加载完成后每分钟同步一次，无需下游请求触发。网络错误、上游 5xx 或非法目录不会覆盖已有数据；旧数据最多保留 5 分钟。上游返回 401/403 时立即清除对应缓存。连续 10 分钟没有访问的目录停止同步并释放，重启代理会清空缓存。无认证请求和非 GET 请求保持原有转发行为。
+首次加载完成后每 10 分钟同步一次，无需下游请求触发。网络错误、上游 5xx 或非法目录不会覆盖已有数据；旧目录从上次成功同步起最多可用 15 分钟。上游返回 401/403 时立即清除对应缓存。连续 10 分钟没有访问的目录停止同步并释放，重启代理会清空缓存。未配置默认令牌的无认证请求和非 GET 请求保持原有转发行为。
 
 `-verbose` 日志记录同步状态、模型数量、字节数和耗时，不输出令牌或目录正文。修改后需要重新构建并重启代理才能生效。

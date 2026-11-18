@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 )
 
-const modelCatalogRefreshInterval = time.Minute
+const modelCatalogRefreshInterval = 10 * time.Minute
+const modelCatalogMaxAge = modelCatalogRefreshInterval + 5*time.Minute
 
 // 缓存仅驻留内存；不同认证、项目及查询参数的目录不能共用。
 type modelCatalogCache struct {
@@ -76,7 +78,7 @@ func (p *proxy) cachedModels(w http.ResponseWriter, r *http.Request) {
 	entry.mu.RUnlock()
 	w.Header().Set("Cache-Control", "private, no-store")
 	// 同步异常只短期保留旧目录，防止撤权后无限期继续提供缓存。
-	if len(body) > 0 && time.Since(updated) <= 5*time.Minute {
+	if len(body) > 0 && time.Since(updated) <= modelCatalogMaxAge {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
@@ -85,7 +87,7 @@ func (p *proxy) cachedModels(w http.ResponseWriter, r *http.Request) {
 	if status != http.StatusUnauthorized && status != http.StatusForbidden {
 		status = http.StatusServiceUnavailable
 	}
-	w.Header().Set("Retry-After", "60")
+	w.Header().Set("Retry-After", strconv.Itoa(int(modelCatalogRefreshInterval.Seconds())))
 	http.Error(w, "模型目录暂不可用，请稍后重试", status)
 }
 

@@ -49,6 +49,8 @@ func main() {
 	listen := flag.String("listen", envOr("CODEX_WS_PROXY_LISTEN", defaultListen), "本地监听地址")
 	target := flag.String("target", envOr("NEW_API_RESPONSES_WS", defaultTarget), "上游 OpenAI 兼容地址，/v1/responses 可省略")
 	verbose := flag.Bool("verbose", false, "输出详细请求、响应和 WebSocket 日志")
+	tokenFile := flag.String("default-token-file", "", "默认 New API 令牌文件（仅当前用户可读）")
+	checkUpdate := flag.Bool("check-service-update", false, "二进制更新时重新加载已安装的 macOS 服务")
 	install := flag.Bool("install-service", false, "安装并启动 macOS 用户级 launchd 服务")
 	uninstall := flag.Bool("uninstall-service", false, "停止并卸载 macOS 用户级 launchd 服务")
 	status := flag.Bool("service-status", false, "查看 macOS 用户级 launchd 服务状态")
@@ -57,6 +59,15 @@ func main() {
 	testTimeout := flag.Duration("test-timeout", networktest.DefaultTimeout, "测速每阶段超时，最大 2m")
 	testDuration := flag.Duration("test-duration", 0, "同一 WebSocket 的稳定性测试时长，如 10m；每 5 秒收发 1 KiB，范围 1s～24h")
 	flag.Parse()
+	if *checkUpdate {
+		if *install || *uninstall || *status || *networkTest || *testDuration != 0 {
+			log.Fatal("-check-service-update 不能与其他操作同时使用")
+		}
+		if err := checkServiceUpdate(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *testDuration != 0 && !*networkTest {
 		log.Fatal("-test-duration 必须与 -network-test 一起使用")
 	}
@@ -78,7 +89,7 @@ func main() {
 			log.Fatal("-install-service、-uninstall-service、-service-status 只能选择一个")
 		}
 		if *install {
-			if err := installService(*listen, *target, *verbose); err != nil {
+			if err := installService(*listen, *target, *verbose, *tokenFile); err != nil {
 				log.Fatal(err)
 			}
 			return
@@ -107,7 +118,11 @@ func main() {
 	mux.HandleFunc("/v1/codex/models", p.cachedModels)
 	mux.HandleFunc("/v1/", p.forwardHTTP)
 	mux.HandleFunc("/", p.forwardHTTP)
-	server := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 15 * time.Second}
+	handler, err := p.withDefaultToken(mux, *listen, *tokenFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 15 * time.Second}
 	go func() {
 		<-ctx.Done()
 		_ = server.Close()
@@ -452,7 +467,7 @@ func launchAgentPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"), nil
 }
 
-func installService(listen, target string, verbose bool) error {
+func installService(listen, target string, verbose bool, tokenFile string) error {
 	plistPath, err := launchAgentPath()
 	if err != nil {
 		return err
@@ -473,16 +488,33 @@ func installService(listen, target string, verbose bool) error {
 		return err
 	}
 	arguments := []string{executable, "-listen", listen, "-target", target}
+	if tokenFile != "" {
+		path, err := filepath.Abs(tokenFile)
+		if err != nil {
+			return err
+		}
+		arguments = append(arguments, "-default-token-file", path)
+	}
+	p, err := newProxy(target, verbose)
+	if err != nil {
+		return err
+	}
+	if _, err := p.withDefaultToken(nil, listen, tokenFile); err != nil {
+		return err
+	}
 	if verbose {
 		arguments = append(arguments, "-verbose")
 	}
-	plist := launchdPlist(arguments, filepath.Join(logDir, "codex-ws-proxy.out.log"), filepath.Join(logDir, "codex-ws-proxy.err.log"))
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+	plist := launchdPlist(launchdLabel, arguments, filepath.Join(logDir, "codex-ws-proxy.out.log"), filepath.Join(logDir, "codex-ws-proxy.err.log"))
+	if err := writeServiceFile(plistPath, []byte(plist)); err != nil {
 		return err
 	}
 	_ = runLaunchctl("bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel))
 	if err := runLaunchctl("bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), plistPath); err != nil {
 		return fmt.Errorf("加载 launchd 服务失败（plist 已写入 %s）: %w", plistPath, err)
+	}
+	if err := installUpdater(executable, plistPath, logDir); err != nil {
+		return err
 	}
 	log.Printf("已安装并启动服务 %s", launchdLabel)
 	log.Printf("plist: %s", plistPath)
@@ -493,6 +525,12 @@ func uninstallService() error {
 	plistPath, err := launchAgentPath()
 	if err != nil {
 		return err
+	}
+	_ = runLaunchctl("bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), updateLabel))
+	for _, path := range []string{updatePlistPath(plistPath), plistPath + ".sha256"} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	_ = runLaunchctl("bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel))
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
@@ -513,20 +551,26 @@ func runLaunchctl(args ...string) error {
 	return command.Run()
 }
 
-func launchdPlist(arguments []string, stdout, stderr string) string {
+func launchdPlist(label string, arguments []string, stdout, stderr string) string {
 	var builder strings.Builder
 	builder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>`)
-	builder.WriteString(launchdLabel)
+	builder.WriteString(label)
 	builder.WriteString(`</string><key>ProgramArguments</key><array>`)
 	for _, argument := range arguments {
 		builder.WriteString(`<string>`)
 		builder.WriteString(xmlEscape(argument))
 		builder.WriteString(`</string>`)
 	}
-	builder.WriteString(`</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+	builder.WriteString(`</array><key>RunAtLoad</key><true/>`)
+	if label == updateLabel {
+		builder.WriteString(`<key>StartInterval</key><integer>60</integer>`)
+	} else {
+		builder.WriteString(`<key>KeepAlive</key><true/>`)
+	}
+	builder.WriteString(`
 <key>StandardOutPath</key><string>`)
 	builder.WriteString(xmlEscape(stdout))
 	builder.WriteString(`</string><key>StandardErrorPath</key><string>`)
