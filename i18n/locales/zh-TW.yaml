@@ -3,6 +3,7 @@
 
 # Errors returned to AI clients
 common.database_error: "資料庫出錯，請聯繫管理員"
+model.catalog_unavailable: "模型目錄暫不可用，請聯絡管理員"
 auth.user_banned: "使用者已被封禁"
 token.get_info_failed: "獲取令牌資訊失敗，請稍後重試"
 token.invalid: "無效的令牌"

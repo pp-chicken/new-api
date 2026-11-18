@@ -55,4 +55,8 @@ Desktop distributions include Electron, which embeds Chromium, Node.js, V8,
 and other third-party components. Electron and Chromium third-party license
 notices must remain available with desktop installers and installed apps.
 
+OpenAI Codex 模型目录
+Copyright 2025 OpenAI
+按 Apache License 2.0 分发，来源及运行时适配见 THIRD-PARTY-LICENSES.md。
+
 ==== End of Notices ====

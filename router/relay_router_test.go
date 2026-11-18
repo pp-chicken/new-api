@@ -15,6 +15,9 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/networktest"
+	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
@@ -302,4 +305,112 @@ func setupRelayRouterTestDB(t *testing.T) {
 			require.NoError(t, os.Unsetenv("SQL_DSN"))
 		}
 	})
+}
+
+// 验证真实路由、中间件和目录协议，避免只测试 JSON 拼装。
+func TestCodexModelCatalog(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, i18n.Init())
+	originalSelfUseMode := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = false
+	t.Cleanup(func() { operation_setting.SelfUseModeEnabled = originalSelfUseMode })
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(ratio_setting.DefaultModelRatio2JSONString()))
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios)) })
+	require.True(t, helper.HasModelBillingConfig("gpt-5.6-sol"))
+	require.True(t, helper.HasModelBillingConfig("gpt-5.6-terra"))
+	require.False(t, helper.HasModelBillingConfig("gpt-daybreak-blue-latest"))
+
+	user := model.User{Username: "codex-catalog-user", Status: common.UserStatusEnabled, Group: "default", Quota: 100}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-5.6-sol", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "gpt-5.6-sol", ChannelId: 2, Enabled: true},
+		{Group: "default", Model: "gpt-5.6-terra", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "gpt-5.6-luna", ChannelId: 1, Enabled: false},
+		{Group: "private", Model: "gpt-5.5", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "gpt-image-1", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "unknown-codex-model", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "gpt-daybreak-blue-latest", ChannelId: 1, Enabled: true},
+	}).Error)
+	for _, token := range []model.Token{
+		{Key: "catalogall"},
+		{Key: "cataloglimited", ModelLimitsEnabled: true, ModelLimits: "gpt-5.6-sol,gpt-5.5"},
+		{Key: "catalogempty", ModelLimitsEnabled: true},
+	} {
+		token.UserId = user.Id
+		token.Status = common.TokenStatusEnabled
+		token.ExpiredTime = -1
+		token.UnlimitedQuota = true
+		require.NoError(t, model.DB.Create(&token).Error)
+	}
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "catalogexpired", Status: common.TokenStatusEnabled, ExpiredTime: 1, UnlimitedQuota: true}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "catalogdisabled", Status: common.TokenStatusDisabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	for _, tc := range []struct {
+		name    string
+		key     string
+		status  int
+		models  []string
+		selfUse bool
+	}{
+		{name: "可见目录", key: "catalogall", status: http.StatusOK, models: []string{"gpt-5.6-sol", "gpt-5.6-terra"}},
+		{name: "令牌限制与分组隔离", key: "cataloglimited", status: http.StatusOK, models: []string{"gpt-5.6-sol"}},
+		{name: "空白名单返回空数组", key: "catalogempty", status: http.StatusOK, models: []string{}},
+		{name: "自用模式允许未定价模型", key: "catalogall", status: http.StatusOK, selfUse: true, models: []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-daybreak-blue-latest"}},
+		{name: "缺少令牌", status: http.StatusUnauthorized},
+		{name: "无效令牌", key: "invalid", status: http.StatusUnauthorized},
+		{name: "过期令牌", key: "catalogexpired", status: http.StatusUnauthorized},
+		{name: "停用令牌", key: "catalogdisabled", status: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			operation_setting.SelfUseModeEnabled = tc.selfUse
+			request := httptest.NewRequest(http.MethodGet, "/v1/codex/models?client_version=0.166.0", nil)
+			if tc.key != "" {
+				request.Header.Set("Authorization", "Bearer sk-"+tc.key)
+			}
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
+			var payload map[string]any
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+			if tc.status != http.StatusOK {
+				assert.Contains(t, payload, "error")
+				assert.NotContains(t, payload, "models")
+				return
+			}
+			assert.Len(t, payload, 1)
+			models, ok := payload["models"].([]any)
+			require.True(t, ok, "models 必须是数组，不能为 null")
+			slugs := make([]string, 0, len(models))
+			for _, item := range models {
+				entry := item.(map[string]any)
+				slug := entry["slug"].(string)
+				slugs = append(slugs, slug)
+				for _, key := range []string{"display_name", "description", "supported_reasoning_levels", "shell_type", "visibility", "supported_in_api", "priority", "support_verbosity", "truncation_policy", "experimental_supported_tools", "input_modalities", "context_window"} {
+					assert.Contains(t, entry, key)
+				}
+				assert.Equal(t, true, entry["supported_in_api"])
+				assert.Equal(t, false, entry["prefer_websockets"])
+				assert.Equal(t, false, entry["use_responses_lite"])
+				assert.Equal(t, false, entry["supports_reasoning_effort_updates"])
+				assert.NotEmpty(t, entry["base_instructions"])
+				assert.Equal(t, entry["base_instructions"], entry["model_messages"].(map[string]any)["instructions_template"])
+				levels := entry["supported_reasoning_levels"].([]any)
+				efforts := make([]string, 0, len(levels))
+				for _, level := range levels {
+					efforts = append(efforts, level.(map[string]any)["effort"].(string))
+				}
+				assert.Contains(t, efforts, entry["default_reasoning_level"])
+				if slug == "gpt-5.6-sol" {
+					assert.Equal(t, []string{"low", "medium", "high", "xhigh", "max", "ultra"}, efforts)
+					assert.Equal(t, float64(272000), entry["context_window"])
+				}
+			}
+			assert.Equal(t, tc.models, slugs)
+		})
+	}
 }
